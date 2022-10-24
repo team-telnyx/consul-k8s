@@ -60,6 +60,19 @@ func (w *MeshWebhook) envoySidecar(namespace corev1.Namespace, pod corev1.Pod, m
 		container.VolumeMounts = append(container.VolumeMounts, volumeMount...)
 	}
 
+	// Add preStopHook if defined in the annotations
+	if _, ok := pod.Annotations[annotationSidecarProxyPreStopDelay]; ok {
+		preStopHook := &corev1.Lifecycle{
+			PreStop: &corev1.Handler {
+				Exec: &corev1.ExecAction {
+					Command: []string{
+   	 					  	"/bin/sh",
+   	 					  	"-c",
+							"sleep " + pod.Annotations[annotationSidecarProxyPreStopDelay],
+   	 	}}}}
+		container.Lifecycle = preStopHook
+	}
+
 	tproxyEnabled, err := transparentProxyEnabled(namespace, pod, w.EnableTransparentProxy)
 	if err != nil {
 		return corev1.Container{}, err
