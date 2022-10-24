@@ -24,27 +24,31 @@ CI_DEV_DOCKER_WORKDIR?=.
 CONSUL_K8S_IMAGE_VERSION?=latest
 ################
 
-ci.dev-tree:
-	@$(SHELL) $(CURDIR)/build-support/scripts/dev.sh $(DEV_PUSH_ARG)
-
 # TODO: Remove this ci.dev-docker target once we move the acceptance tests to Github Actions.
 # In CircleCI, the linux binary will be attached from a previous step at pkg/bin/linux_amd64/. This make target
 # should only run in CI and not locally.
 ci.dev-docker:
 	@echo "Building consul-k8s Development container - $(CI_DEV_DOCKER_IMAGE_NAME)"
-	@docker build -t '$(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)' \
+	@echo $(DOCKER_PASS) | docker login -u="$(DOCKER_USER)" --password-stdin
+	@docker buildx build -t '$(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)' \
+	--platform linux/amd64,linux/arm64 \
 	--target=dev \
-	--build-arg ARCH=amd64 \
+	--push \
 	--label COMMIT_SHA=$(CIRCLE_SHA1) \
 	--label PULL_REQUEST=$(CIRCLE_PULL_REQUEST) \
 	--label CIRCLE_BUILD_URL=$(CIRCLE_BUILD_URL) \
 	$(CI_DEV_DOCKER_WORKDIR) -f $(CURDIR)/Dockerfile
-	@echo $(DOCKER_PASS) | docker login -u="$(DOCKER_USER)" --password-stdin
-	@echo "Pushing dev image to: https://cloud.docker.com/u/$(CI_DEV_DOCKER_NAMESPACE)/repository/docker/$(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME)"
-	@docker push $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)
+	@echo "Pushed dev image to: $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)"
 ifeq ($(CIRCLE_BRANCH), main)
-	@docker tag $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT) $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest
-	@docker push $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest
+	@docker buildx build -t '$(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest' \
+	--platform linux/amd64,linux/arm64 \
+	--target=dev \
+	--push \
+	--label COMMIT_SHA=$(CIRCLE_SHA1) \
+	--label PULL_REQUEST=$(CIRCLE_PULL_REQUEST) \
+	--label CIRCLE_BUILD_URL=$(CIRCLE_BUILD_URL) \
+	$(CI_DEV_DOCKER_WORKDIR) -f $(CURDIR)/Dockerfile
+	@echo "Pushed dev image to: $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest"
 endif
 
 # In Github Actions, the linux binary will be attached from a previous step at pkg/bin/linux_amd64/. This make target

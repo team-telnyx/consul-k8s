@@ -4,9 +4,9 @@ on:
 
 env:
   TEST_RESULTS: /tmp/test-results # path to where test results are saved
-  CONSUL_VERSION: 1.13.0-alpha1 # Consul's OSS version to use in tests
-  CONSUL_ENT_VERSION: 1.13.0-alpha1+ent # Consul's enterprise version to use in tests
-  GOTESTSUM_VERSION: 1.6.4 # You cannot use environment variables with workflows. The gotestsum version is hardcoded in the reusable workflows too.
+  CONSUL_VERSION: 1.13.1 # Consul's OSS version to use in tests
+  CONSUL_ENT_VERSION: 1.13.1+ent # Consul's enterprise version to use in tests
+  GOTESTSUM_VERSION: 1.8.1 # You cannot use environment variables with workflows. The gotestsum version is hardcoded in the reusable workflows too.
 
 jobs:
   get-go-version:
@@ -74,7 +74,7 @@ jobs:
       - unit-helm-gen
     runs-on: ubuntu-latest
     container: 
-      image: docker.mirror.hashicorp.services/hashicorpdev/consul-helm-test:0.11.0
+      image: docker.mirror.hashicorp.services/hashicorpdev/consul-helm-test:0.12.0
       options: --user 1001
     steps:
       - name: Checkout code
@@ -97,7 +97,7 @@ jobs:
         with:
           go-version: ${{ needs.get-go-version.outputs.go-version }}
 
-      - run: go get -u github.com/hashicorp/lint-consul-retry && lint-consul-retry
+      - run: go install github.com/hashicorp/lint-consul-retry@master && lint-consul-retry
 
       - name: Run lint
         working-directory: control-plane
@@ -198,7 +198,7 @@ jobs:
           wget https://releases.hashicorp.com/consul/${{env.CONSUL_ENT_VERSION}}/consul_${{env.CONSUL_ENT_VERSION}}_linux_amd64.zip && \
             unzip consul_${{env.CONSUL_ENT_VERSION}}_linux_amd64.zip -d $HOME/bin && \
             rm consul_${{env.CONSUL_ENT_VERSION}}_linux_amd64.zip
-            chmod +x $HOME/bin/consul
+          chmod +x $HOME/bin/consul
 
       - name: Run go tests
         working-directory: control-plane

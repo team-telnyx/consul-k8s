@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -269,7 +268,7 @@ func TestRun_ReplicationTokenPrimaryDC_WithProvidedSecretID(t *testing.T) {
 	setUpK8sServiceAccount(t, k8s, ns)
 
 	replicationToken := "123e4567-e89b-12d3-a456-426614174000"
-	replicationTokenFile, err := ioutil.TempFile("", "replicationtoken")
+	replicationTokenFile, err := os.CreateTemp("", "replicationtoken")
 	require.NoError(t, err)
 	defer os.Remove(replicationTokenFile.Name())
 
@@ -524,7 +523,7 @@ func TestRun_AnonymousTokenPolicy(t *testing.T) {
 				k8s, consul, consulHTTPAddr, cleanup = mockReplicatedSetup(t, bootToken)
 				defer cleanup()
 
-				tmp, err := ioutil.TempFile("", "")
+				tmp, err := os.CreateTemp("", "")
 				require.NoError(t, err)
 				_, err = tmp.WriteString(bootToken)
 				require.NoError(t, err)
@@ -1560,7 +1559,7 @@ func TestRun_AlreadyBootstrapped(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				// Write token to a file.
-				bootTokenFile, err := ioutil.TempFile("", "")
+				bootTokenFile, err := os.CreateTemp("", "")
 				require.NoError(t, err)
 				defer os.Remove(bootTokenFile.Name())
 
@@ -1685,7 +1684,7 @@ func TestRun_AlreadyBootstrapped_ServerTokenExists(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				// Write token to a file.
-				bootTokenFile, err := ioutil.TempFile("", "")
+				bootTokenFile, err := os.CreateTemp("", "")
 				require.NoError(t, err)
 				defer os.Remove(bootTokenFile.Name())
 
@@ -2292,7 +2291,7 @@ func TestRun_PoliciesAndBindingRulesACLLogin_SecondaryDatacenter(t *testing.T) {
 			TokenFlags:       []string{"-api-gateway-controller"},
 			PolicyNames:      []string{"api-gateway-controller-policy-" + secondaryDatacenter},
 			Roles:            []string{resourcePrefix + "-api-gateway-controller-acl-role-" + secondaryDatacenter},
-			GlobalAuthMethod: false,
+			GlobalAuthMethod: true,
 		},
 		{
 			TestName:         "Snapshot Agent",
@@ -2600,8 +2599,8 @@ func TestRun_ValidateLoginToken_SecondaryDatacenter(t *testing.T) {
 			ComponentName:    "api-gateway-controller",
 			TokenFlags:       []string{"-api-gateway-controller"},
 			Roles:            []string{resourcePrefix + "-api-gateway-controller-acl-role-dc2"},
-			GlobalAuthMethod: false,
-			GlobalToken:      false,
+			GlobalAuthMethod: true,
+			GlobalToken:      true,
 		},
 		{
 			ComponentName:    "snapshot-agent",

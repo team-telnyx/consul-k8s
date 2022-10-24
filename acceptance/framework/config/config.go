@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,16 +38,23 @@ type TestConfig struct {
 
 	EnablePodSecurityPolicies bool
 
+	EnableCNI bool
+
 	EnableTransparentProxy bool
 
-	ConsulImage    string
-	ConsulK8SImage string
-	ConsulVersion  *version.Version
+	DisablePeering bool
+
+	HelmChartVersion string
+	ConsulImage      string
+	ConsulK8SImage   string
+	ConsulVersion    *version.Version
+	EnvoyImage       string
 
 	NoCleanupOnFailure bool
 	DebugDirectory     string
 
 	UseKind bool
+	UseGKE  bool
 
 	helmChartPath string
 }
@@ -80,10 +87,19 @@ func (t *TestConfig) HelmValuesFromConfig() (map[string]string, error) {
 		setIfNotEmpty(helmValues, "global.enablePodSecurityPolicies", "true")
 	}
 
+	if t.EnableCNI {
+		setIfNotEmpty(helmValues, "connectInject.cni.enabled", "true")
+		// GKE is currently the only cloud provider that uses a different CNI bin dir.
+		if t.UseGKE {
+			setIfNotEmpty(helmValues, "connectInject.cni.cniBinDir", "/home/kubernetes/bin")
+		}
+	}
+
 	setIfNotEmpty(helmValues, "connectInject.transparentProxy.defaultEnabled", strconv.FormatBool(t.EnableTransparentProxy))
 
 	setIfNotEmpty(helmValues, "global.image", t.ConsulImage)
 	setIfNotEmpty(helmValues, "global.imageK8S", t.ConsulK8SImage)
+	setIfNotEmpty(helmValues, "global.imageEnvoy", t.EnvoyImage)
 
 	return helmValues, nil
 }
@@ -104,7 +120,7 @@ func (t *TestConfig) entImage() (string, error) {
 	}
 
 	// Unmarshal values.yaml to current global.image value.
-	valuesContents, err := ioutil.ReadFile(filepath.Join(t.helmChartPath, "values.yaml"))
+	valuesContents, err := os.ReadFile(filepath.Join(t.helmChartPath, "values.yaml"))
 	if err != nil {
 		return "", err
 	}

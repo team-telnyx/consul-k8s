@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -21,6 +21,8 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/mapstructure"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -76,6 +78,9 @@ type Command struct {
 	flagEnablePartitions   bool   // true if Admin Partitions are enabled
 	flagPartitionName      string // name of the Admin Partition
 	flagPartitionTokenFile string
+
+	// Flags to support peering.
+	flagEnablePeering bool // true if Cluster Peering is enabled
 
 	// Flags to support namespaces.
 	flagEnableNamespaces                 bool   // Use namespacing on all components
@@ -178,6 +183,9 @@ func (c *Command) init() {
 		"[Enterprise Only] Name of the Admin Partition")
 	c.flags.StringVar(&c.flagPartitionTokenFile, "partition-token-file", "",
 		"[Enterprise Only] Path to file containing ACL token to be used in non-default partitions.")
+
+	c.flags.BoolVar(&c.flagEnablePeering, "enable-peering", false,
+		"Enables Cluster Peering.")
 
 	c.flags.BoolVar(&c.flagEnableNamespaces, "enable-namespaces", false,
 		"[Enterprise Only] Enables namespaces, in either a single Consul namespace or mirrored [Enterprise only feature]")
@@ -584,7 +592,16 @@ func (c *Command) Run(args []string) int {
 			return 1
 		}
 		serviceAccountName := c.withPrefix("api-gateway-controller")
-		if err := c.createACLPolicyRoleAndBindingRule("api-gateway-controller", rules, consulDC, primaryDC, localPolicy, primary, localComponentAuthMethodName, serviceAccountName, consulClient); err != nil {
+
+		// API gateways require a global policy/token because they must
+		// create config-entry resources in the primary, even when deployed
+		// to a secondary datacenter
+		authMethodName := localComponentAuthMethodName
+		if !primary {
+			authMethodName = globalComponentAuthMethodName
+		}
+		err = c.createACLPolicyRoleAndBindingRule("api-gateway-controller", rules, consulDC, primaryDC, globalPolicy, primary, authMethodName, serviceAccountName, consulClient)
+		if err != nil {
 			c.log.Error(err.Error())
 			return 1
 		}
@@ -734,17 +751,17 @@ type gatewayRulesGenerator func(name, namespace string) (string, error)
 type ConfigureGatewayParams struct {
 	// GatewayType specifies whether it is an ingress or terminating gateway.
 	GatewayType string
-	//GatewayNames is the collection of gateways that have been specified.
+	// GatewayNames is the collection of gateways that have been specified.
 	GatewayNames []string
-	//AuthMethodName is the authmethod for which to register the binding rules and policies for the gateways
+	// AuthMethodName is the authmethod for which to register the binding rules and policies for the gateways
 	AuthMethodName string
-	//RuleGenerator is the function that supplies the rules that will be added to the policy.
+	// RuleGenerator is the function that supplies the rules that will be added to the policy.
 	RulesGenerator gatewayRulesGenerator
-	//ConsulDC is the name of the DC where the gateways will be registered
+	// ConsulDC is the name of the DC where the gateways will be registered
 	ConsulDC string
-	//PrimaryDC is the name of the Primary Data Center
+	// PrimaryDC is the name of the Primary Data Center
 	PrimaryDC string
-	//Primary specifies whether the ConsulDC is the Primary Data Center
+	// Primary specifies whether the ConsulDC is the Primary Data Center
 	Primary bool
 }
 
@@ -755,7 +772,7 @@ func (c *Command) configureGateway(gatewayParams ConfigureGatewayParams, consulC
 	for _, name := range gatewayParams.GatewayNames {
 		if name == "" {
 			errMessage := fmt.Sprintf("%s gateway name cannot be empty",
-				strings.Title(strings.ToLower(gatewayParams.GatewayType)))
+				cases.Title(language.English).String(gatewayParams.GatewayType))
 			c.log.Error(errMessage)
 			return errors.New(errMessage)
 		}
@@ -946,7 +963,7 @@ func (c *Command) validateFlags() error {
 	// For the Consul node name to be discoverable via DNS, it must contain only
 	// dashes and alphanumeric characters. Length is also constrained.
 	// These restrictions match those defined in Consul's agent definition.
-	var invalidDnsRe = regexp.MustCompile(`[^A-Za-z0-9\\-]+`)
+	invalidDnsRe := regexp.MustCompile(`[^A-Za-z0-9\\-]+`)
 	const maxDNSLabelLength = 63
 
 	if invalidDnsRe.MatchString(c.flagSyncConsulNodeName) {
@@ -980,7 +997,7 @@ func (c *Command) validateFlags() error {
 
 func loadTokenFromFile(tokenFile string) (string, error) {
 	// Load the bootstrap token from file.
-	tokenBytes, err := ioutil.ReadFile(tokenFile)
+	tokenBytes, err := os.ReadFile(tokenFile)
 	if err != nil {
 		return "", fmt.Errorf("unable to read token from file %q: %s", tokenFile, err)
 	}

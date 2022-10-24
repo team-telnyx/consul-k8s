@@ -3,12 +3,15 @@ schema = "1"
 project "consul-k8s" {
   team = "consul-k8s"
   slack {
-    notification_channel = "CBXF3CGAF" # team-consul-kubernetes
+    notification_channel = "C0421KHNAV9" # feed-consul-k8s-ci
   }
   github {
     organization = "hashicorp"
     repository = "consul-k8s"
-    release_branches = ["cb/crt-testing"]
+    release_branches = [
+      "main",
+      "release/**",
+    ]
   }
 }
 
@@ -195,22 +198,8 @@ event "promote-staging" {
   }
 }
 
-event "promote-staging-new-hc-releases" {
-  depends = ["promote-staging"]
-  action "promote-staging-new-hc-releases" {
-    organization = "hashicorp"
-    repository = "crt-workflows-common"
-    workflow = "promote-staging-new-hc-releases"
-	config = "release-metadata.hcl"
-  }
-
-  notification {
-    on = "fail"
-  }
-}
-
 event "promote-staging-docker" {
-  depends = ["promote-staging-new-hc-releases"]
+  depends = ["promote-staging"]
   action "promote-staging-docker" {
     organization = "hashicorp"
     repository = "crt-workflows-common"
@@ -259,6 +248,19 @@ event "promote-production-packaging" {
     organization = "hashicorp"
     repository = "crt-workflows-common"
     workflow = "promote-production-packaging"
+  }
+
+  notification {
+    on = "always"
+  }
+}
+
+event "promote-production-helm" {
+  depends = ["promote-production-packaging"]
+  action "promote-production-helm" {
+    organization = "hashicorp"
+    repository = "crt-workflows-common"
+    workflow = "promote-production-helm"
   }
 
   notification {

@@ -51,7 +51,8 @@ func TestConfigEntryControllers_createsConfigEntry(t *testing.T) {
 					Namespace: kubeNS,
 				},
 				Spec: v1alpha1.ServiceDefaultsSpec{
-					Protocol: "http",
+					Protocol:              "http",
+					MaxInboundConnections: 100,
 				},
 			},
 			reconciler: func(client client.Client, consulClient *capi.Client, logger logr.Logger) testReconciler {
@@ -68,6 +69,7 @@ func TestConfigEntryControllers_createsConfigEntry(t *testing.T) {
 				svcDefault, ok := consulEntry.(*capi.ServiceConfigEntry)
 				require.True(t, ok, "cast error")
 				require.Equal(t, "http", svcDefault.Protocol)
+				require.Equal(t, 100, svcDefault.MaxInboundConnections)
 			},
 		},
 		{
@@ -268,7 +270,7 @@ func TestConfigEntryControllers_createsConfigEntry(t *testing.T) {
 					Namespace: kubeNS,
 				},
 				Spec: v1alpha1.ServiceIntentionsSpec{
-					Destination: v1alpha1.Destination{
+					Destination: v1alpha1.IntentionDestination{
 						Name: "foo",
 					},
 					Sources: v1alpha1.SourceIntentions{
@@ -738,7 +740,7 @@ func TestConfigEntryControllers_updatesConfigEntry(t *testing.T) {
 					Namespace: kubeNS,
 				},
 				Spec: v1alpha1.ServiceIntentionsSpec{
-					Destination: v1alpha1.Destination{
+					Destination: v1alpha1.IntentionDestination{
 						Name: "foo",
 					},
 					Sources: v1alpha1.SourceIntentions{
@@ -1169,7 +1171,7 @@ func TestConfigEntryControllers_deletesConfigEntry(t *testing.T) {
 					Finalizers:        []string{FinalizerName},
 				},
 				Spec: v1alpha1.ServiceIntentionsSpec{
-					Destination: v1alpha1.Destination{
+					Destination: v1alpha1.IntentionDestination{
 						Name: "foo",
 					},
 					Sources: v1alpha1.SourceIntentions{

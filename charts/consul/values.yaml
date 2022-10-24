@@ -31,10 +31,25 @@ global:
 
   # [Experimental] Configures the Cluster Peering feature. Requires Consul v1.13+ and Consul-K8s v0.45+.
   peering:
-    # If true, the Helm chart will enable Cluster Peering for the cluster. This will enable peering controllers and
-    # allow use of the PeeringAcceptor and PeeringDialer CRDs to establish peerings for service mesh.
-    # @type boolean
+    # If true, the Helm chart enables Cluster Peering for the cluster. This option enables peering controllers and
+    # allows use of the PeeringAcceptor and PeeringDialer CRDs for establishing service mesh peerings.
     enabled: false
+    tokenGeneration:
+      serverAddresses:
+        # Source can be set to "","consul" or "static".
+        #
+        # "" is the default source. If servers are enabled, it will check if `server.exposeService` is enabled, and read
+        # the addresses from that service to use as the peering token server addresses. If using admin partitions and
+        # only Consul client agents are enabled, the addresses in `externalServers.hosts` and `externalServers.grpcPort`
+        # will be used.
+        #
+        # "consul" will use the Consul advertise addresses in the peering token.
+        #
+        # "static" will use the addresses specified in `global.peering.tokenGeneration.serverAddresses.static`.
+        source: ""
+        # Static addresses must be formatted "hostname|ip:port" where the port is the Consul server(s)' grpc port.
+        # @type: array<string>
+        static: []
 
   # [Enterprise Only] Enabling `adminPartitions` allows creation of Admin Partitions in Kubernetes clusters.
   # It additionally indicates that you are running Consul Enterprise v1.11+ with a valid Consul Enterprise
@@ -94,7 +109,7 @@ global:
   # image: "hashicorp/consul-enterprise:1.10.0-ent"
   # ```
   # @default: hashicorp/consul:<latest version>
-  image: "hashicorp/consul:1.12.2"
+  image: "hashicorp/consul:1.13.2"
 
   # Array of objects containing image pull secret names that will be applied to each service account.
   # This can be used to reference image pull secrets if using a custom consul or consul-k8s-control-plane Docker image.
@@ -114,7 +129,7 @@ global:
   # image that is used for functionality such as catalog sync.
   # This can be overridden per component.
   # @default: hashicorp/consul-k8s-control-plane:<latest version>
-  imageK8S: "hashicorp/consul-k8s-control-plane:0.45.0"
+  imageK8S: hashicorp/consul-k8s-control-plane:0.48.0
 
   # The name of the datacenter that the agents should
   # register as. This can't be changed once the Consul cluster is up and running
@@ -256,16 +271,16 @@ global:
         authMethodPath: "kubernetes"
 
         # The path to a PKI secrets engine for the root certificate.
-        # Please see https://www.consul.io/docs/connect/ca/vault#rootpkipath.
+        # For more details, please refer to [Vault Connect CA configuration](https://www.consul.io/docs/connect/ca/vault#rootpkipath).
         rootPKIPath: ""
 
         # The path to a PKI secrets engine for the generated intermediate certificate.
-        # Please see https://www.consul.io/docs/connect/ca/vault#intermediatepkipath.
+        # For more details, please refer to [Vault Connect CA configuration](https://www.consul.io/docs/connect/ca/vault#intermediatepkipath).
         intermediatePKIPath: ""
 
         # Additional Connect CA configuration in JSON format.
-        # Please see https://www.consul.io/docs/connect/ca/vault#common-ca-config-options
-        # for additional configuration options.
+        # Please refer to [Vault Connect CA configuration](https://www.consul.io/docs/connect/ca/vault#configuration)
+        # for all configuration options available for that provider.
         #
         # Example:
         #
@@ -274,6 +289,7 @@ global:
         #   {
         #     "connect": [{
         #       "ca_config": [{
+        #            "namespace": "my-vault-ns",
         #            "leaf_cert_ttl": "36h"
         #         }]
         #     }]
@@ -613,7 +629,7 @@ global:
   # connect-injected sidecar proxies and mesh, terminating, and ingress gateways.
   # See https://www.consul.io/docs/connect/proxies/envoy for full compatibility matrix between Consul and Envoy.
   # @default: envoyproxy/envoy-alpine:<latest supported version>
-  imageEnvoy: "envoyproxy/envoy:v1.22.2"
+  imageEnvoy: "envoyproxy/envoy:v1.23.1"
 
   # Configuration for running this Helm chart on the Red Hat OpenShift platform.
   # This Helm chart currently supports OpenShift v4.x+.
@@ -725,13 +741,18 @@ server:
 
   # The StorageClass to use for the servers' StatefulSet storage. It must be
   # able to be dynamically provisioned if you want the storage
-  # to be automatically created. For example, to use local
-  # (https://kubernetes.io/docs/concepts/storage/storage-classes/#local)
+  # to be automatically created. For example, to use 
+  # local(https://kubernetes.io/docs/concepts/storage/storage-classes/#local)
   # storage classes, the PersistentVolumeClaims would need to be manually created.
   # A `null` value will use the Kubernetes cluster's default StorageClass. If a default
   # StorageClass does not exist, you will need to create one.
-  # See https://www.consul.io/docs/install/performance#read-write-tuning for considerations around choosing a
-  # performant storage class.
+  # Refer to the [Read/Write Tuning](https://www.consul.io/docs/install/performance#read-write-tuning) 
+  # section of the Server Performance Requirements documentation for considerations 
+  # around choosing a performant storage class.
+  #
+  # ~> **Note:** The [Reference Architecture](https://learn.hashicorp.com/tutorials/consul/reference-architecture#hardware-sizing-for-consul-servers)
+  # contains best practices and recommendations for selecting suitable
+  # hardware sizes for your Consul servers.
   # @type: string
   storageClass: null
 
@@ -757,7 +778,7 @@ server:
 
   # The resource requests (CPU, memory, etc.)
   # for each of the server agents. This should be a YAML map corresponding to a Kubernetes
-  # ResourceRequirements (https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#resourcerequirements-v1-core)
+  # ResourceRequirements (https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.24/#resourcerequirements-v1-core)
   # object. NOTE: The use of a YAML string is deprecated.
   #
   # Example:
@@ -992,6 +1013,43 @@ server:
   # @type: string
   annotations: null
 
+  # Configures a service to expose ports on the Consul servers over a Kubernetes Service.
+  exposeService:
+    # When enabled, deploys a Kubernetes Service to reach the Consul servers.
+    # @type: boolean
+    enabled: "-"
+    # Type of service, supports LoadBalancer or NodePort.
+    # @type: string
+    type: LoadBalancer
+    # If service is of type NodePort, configures the nodePorts.
+    nodePort:
+      # Configures the nodePort to expose the Consul server http port.
+      # @type: integer
+      http: null
+      # Configures the nodePort to expose the Consul server https port.
+      # @type: integer
+      https: null
+      # Configures the nodePort to expose the Consul server serf port.
+      # @type: integer
+      serf: null
+      # Configures the nodePort to expose the Consul server rpc port.
+      # @type: integer
+      rpc: null
+      # Configures the nodePort to expose the Consul server grpc port.
+      # @type: integer
+      grpc: null
+    # This value defines additional annotations for
+    # server pods. This should be formatted as a multi-line string.
+    #
+    # ```yaml
+    # annotations: |
+    #   "sample/annotation1": "foo"
+    #   "sample/annotation2": "bar"
+    # ```
+    #
+    # @type: string
+    annotations: null
+
   # Server service properties.
   service:
     # Annotations to apply to the server service.
@@ -1033,6 +1091,9 @@ externalServers:
 
   # The HTTPS port of the Consul servers.
   httpsPort: 8501
+
+  # The GRPC port of the Consul servers.
+  grpcPort: 8503
 
   # The server name to use as the SNI host header when connecting with HTTPS.
   # @type: string
@@ -1734,12 +1795,12 @@ syncCatalog:
 
   # Refers to a Kubernetes secret that you have created that contains
   # an ACL token for your Consul cluster which allows the sync process the correct
-  # permissions. This is only needed if ACLs are enabled on the Consul cluster.
+  # permissions. This is only needed if ACLs are managed manually within the Consul cluster, i.e. `global.acls.manageSystemACLs` is `false`.
   aclSyncToken:
-    # The name of the Vault secret that holds the acl sync token.
+    # The name of the Kubernetes secret that holds the acl sync token.
     # @type: string
     secretName: null
-    # The key within the Vault secret that holds the acl sync.
+    # The key within the Kubernetes secret that holds the acl sync token.
     # @type: string
     secretKey: null
 
@@ -1812,6 +1873,18 @@ syncCatalog:
   # @type: map
   extraLabels: null
 
+  # This value defines additional annotations for
+  # the catalog sync pods. This should be formatted as a multi-line string.
+  #
+  # ```yaml
+  # annotations: |
+  #   "sample/annotation1": "foo"
+  #   "sample/annotation2": "bar"
+  # ```
+  #
+  # @type: string
+  annotations: null
+  
 # Configures the automatic Connect sidecar injector.
 connectInject:
   # True if you want to enable connect injection. Set to "-" to inherit from
@@ -1847,6 +1920,90 @@ connectInject:
     # This value is also overridable via the "consul.hashicorp.com/transparent-proxy-overwrite-probes" annotation.
     # Note: This value has no effect if transparent proxy is disabled on the pod.
     defaultOverwriteProbes: true
+
+  # This configures the PodDisruptionBudget (https://kubernetes.io/docs/tasks/run-application/configure-pdb/)
+  # for the service mesh sidecar injector.
+  disruptionBudget: 
+    # This will enable/disable registering a PodDisruptionBudget for the 
+    # service mesh sidecar injector. If this is enabled, it will only register the budget so long as
+    # the service mesh is enabled.
+    enabled: true
+
+    # The maximum number of unavailable pods. By default, this will be
+    # automatically computed based on the `connectInject.replicas` value to be `(n/2)-1`.
+    # If you need to set this to `0`, you will need to add a
+    # --set 'connectInject.disruptionBudget.maxUnavailable=0'` flag to the helm chart installation
+    # command because of a limitation in the Helm templating language.
+    # @type: integer
+    maxUnavailable: null
+
+  # Configures consul-cni plugin for Consul Service mesh services
+  cni:
+    # If true, then all traffic redirection setup will use the consul-cni plugin. 
+    # Requires connectInject.enabled to also be true.
+    # @type: boolean
+    enabled: false
+
+    # Log level for the installer and plugin. Overrides global.logLevel
+    # @type: string
+    logLevel: null 
+    
+    # Location on the kubernetes node where the CNI plugin is installed. Shoud be the absolute path and start with a '/'
+    # Example on GKE:
+    #
+    # ```yaml
+    # cniBinDir: "/home/kubernetes/bin"
+    # ```
+    # @type: string
+    cniBinDir: "/opt/cni/bin"
+
+    # Location on the kubernetes node of all CNI configuration. Should be the absolute path and start with a '/'
+    # @type: string
+    cniNetDir: "/etc/cni/net.d"
+ 
+    # The resource settings for CNI installer daemonset.
+    # @recurse: false
+    # @type: map
+    resources:
+      requests:
+        memory: "75Mi"
+        cpu: "75m"
+      limits:
+        memory: "100Mi"
+        cpu: "100m"
+
+    # Resource quotas for running the daemonset as system critical pods
+    resourceQuota:
+      pods: 5000
+
+    # The security context for the CNI installer daemonset. This should be a YAML map corresponding to a
+    # Kubernetes [SecurityContext](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/) object.
+    # By default, servers will run as root, with user ID `0` and group ID `0`.
+    # Note: if running on OpenShift, this setting is ignored because the user and group are set automatically
+    # by the OpenShift platform.
+    # @type: map
+    # @recurse: false
+    securityContext:
+      runAsNonRoot: false
+      runAsGroup: 0
+      runAsUser: 0
+
+    # updateStrategy for the CNI installer DaemonSet.
+    # See https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/#daemonset-update-strategy.
+    # This should be a multi-line string mapping directly to the updateStrategy
+    #
+    # Example:
+    #
+    # ```yaml
+    # updateStrategy: |
+    #   rollingUpdate:
+    #     maxUnavailable: 5
+    #   type: RollingUpdate
+    # ```
+    #
+    # @type: string
+    updateStrategy: null
+
 
   # Configures metrics for Consul Connect services. All values are overridable
   # via annotations on a per-pod basis.
@@ -1895,6 +2052,18 @@ connectInject:
   # Optional priorityClassName.
   priorityClassName: ""
 
+  # This value defines additional annotations for
+  # connect inject pods. This should be formatted as a multi-line string.
+  #
+  # ```yaml
+  # annotations: |
+  #   "sample/annotation1": "foo"
+  #   "sample/annotation2": "bar"
+  # ```
+  #
+  # @type: string
+  annotations: null
+  
   # The Docker image for Consul to use when performing Connect injection.
   # Defaults to global.image.
   # @type: string

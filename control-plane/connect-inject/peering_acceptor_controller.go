@@ -3,6 +3,8 @@ package connectinject
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -13,22 +15,37 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // PeeringAcceptorController reconciles a PeeringAcceptor object.
 type PeeringAcceptorController struct {
 	client.Client
 	// ConsulClient points at the agent local to the connect-inject deployment pod.
-	ConsulClient *api.Client
-	Log          logr.Logger
-	Scheme       *runtime.Scheme
+	ConsulClient              *api.Client
+	ExposeServersServiceName  string
+	ReadServerExternalService bool
+	TokenServerAddresses      []string
+	ReleaseNamespace          string
+	Log                       logr.Logger
+	Scheme                    *runtime.Scheme
 	context.Context
 }
 
-const FinalizerName = "finalizers.consul.hashicorp.com"
+const (
+	FinalizerName    = "finalizers.consul.hashicorp.com"
+	ConsulAgentError = "ConsulAgentError"
+	InternalError    = "InternalError"
+	KubernetesError  = "KubernetesError"
+)
 
 //+kubebuilder:rbac:groups=consul.hashicorp.com,resources=peeringacceptors,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=consul.hashicorp.com,resources=peeringacceptors/status,verbs=get;update;patch
@@ -39,11 +56,16 @@ const FinalizerName = "finalizers.consul.hashicorp.com"
 // move the current state of the cluster closer to the desired state.
 // PeeringAcceptor resources determine whether to generate a new peering token in Consul and store it in the backend
 // specified in the spec.
-// - If the resource doesn't exist, the peering should be deleted in Consul.
-// - If the resource exists, and a peering doesn't exist in Consul, it should be created.
-// - If the resource exists, and a peering does exist in Consul, it should be reconciled.
-// - If the status of the resource does not match the current state of the specified secret, generate a new token
-//   and store it according to the spec.
+//   - If the resource doesn't exist, the peering should be deleted in Consul.
+//   - If the resource exists, and a peering doesn't exist in Consul, it should be created.
+//   - If the resource exists, and a peering does exist in Consul, it should be reconciled.
+//   - If the status of the resource does not match the current state of the specified secret, generate a new token
+//     and store it according to the spec.
+//
+// NOTE: It is possible that Reconcile is called multiple times concurrently because we're watching
+// two different resource kinds. As a result, we need to make sure that the code in this method
+// is thread-safe. For example, we may need to fetch the resource again before writing because another
+// call to Reconcile could have modified it, and so we need to make sure that we're updating the latest version.
 func (r *PeeringAcceptorController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	r.Log.Info("received request for PeeringAcceptor", "name", req.Name, "ns", req.Namespace)
 
@@ -76,7 +98,7 @@ func (r *PeeringAcceptorController) Reconcile(ctx context.Context, req ctrl.Requ
 			r.Log.Info("PeeringAcceptor was deleted, deleting from Consul", "name", req.Name, "ns", req.Namespace)
 			err := r.deletePeering(ctx, req.Name)
 			if acceptor.Secret().Backend == "kubernetes" {
-				err = r.deleteK8sSecret(ctx, acceptor)
+				err = r.deleteK8sSecret(ctx, acceptor.Secret().Name, acceptor.Namespace)
 			}
 			if err != nil {
 				return ctrl.Result{}, err
@@ -87,19 +109,26 @@ func (r *PeeringAcceptorController) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	statusSecretSet := acceptor.SecretRef() != nil
-
-	// existingStatusSecret will be nil if it doesn't exist, and have the contents of the secret if it does exist.
-	var existingStatusSecret *corev1.Secret
-	if statusSecretSet {
-		existingStatusSecret, err = r.getExistingSecret(ctx, acceptor.SecretRef().Name, acceptor.Namespace)
+	// Scrape the address of the server service
+	var serverExternalAddresses []string
+	if r.ReadServerExternalService {
+		addrs, err := r.getExposeServersServiceAddresses()
 		if err != nil {
-			r.updateStatusError(ctx, acceptor, err)
+			r.updateStatusError(ctx, acceptor, KubernetesError, err)
 			return ctrl.Result{}, err
 		}
+		serverExternalAddresses = addrs
+	} else if len(r.TokenServerAddresses) > 0 {
+		serverExternalAddresses = r.TokenServerAddresses
 	}
 
-	var secretResourceVersion string
+	// existingSecret will be nil if it doesn't exist, and have the contents of the secret if it does exist.
+	existingSecret, err := r.getExistingSecret(ctx, acceptor.Secret().Name, acceptor.Namespace)
+	if err != nil {
+		r.Log.Error(err, "error retrieving existing secret", "name", acceptor.Secret().Name)
+		r.updateStatusError(ctx, acceptor, KubernetesError, err)
+		return ctrl.Result{}, err
+	}
 
 	// Read the peering from Consul.
 	peering, _, err := r.ConsulClient.Peerings().Read(ctx, acceptor.Name, nil)
@@ -113,79 +142,64 @@ func (r *PeeringAcceptorController) Reconcile(ctx context.Context, req ctrl.Requ
 	if peering == nil {
 		r.Log.Info("peering doesn't exist in Consul; creating new peering", "name", acceptor.Name)
 
-		if statusSecretSet {
-			if existingStatusSecret != nil {
-				r.Log.Info("stale secret in status; deleting stale secret", "name", acceptor.Name)
-				err := r.Client.Delete(ctx, existingStatusSecret)
-				if err != nil {
-					r.updateStatusError(ctx, acceptor, err)
-					return ctrl.Result{}, err
-				}
+		if acceptor.SecretRef() != nil {
+			r.Log.Info("stale secret in status; deleting stale secret", "name", acceptor.Name, "secret-name", acceptor.SecretRef().Name)
+			if err := r.deleteK8sSecret(ctx, acceptor.SecretRef().Name, acceptor.Namespace); err != nil {
+				r.updateStatusError(ctx, acceptor, KubernetesError, err)
+				return ctrl.Result{}, err
 			}
 		}
 		// Generate and store the peering token.
 		var resp *api.PeeringGenerateTokenResponse
-		if resp, err = r.generateToken(ctx, acceptor.Name); err != nil {
-			r.updateStatusError(ctx, acceptor, err)
+		if resp, err = r.generateToken(ctx, acceptor.Name, serverExternalAddresses); err != nil {
+			r.updateStatusError(ctx, acceptor, ConsulAgentError, err)
 			return ctrl.Result{}, err
 		}
 		if acceptor.Secret().Backend == "kubernetes" {
-			secretResourceVersion, err = r.createOrUpdateK8sSecret(ctx, acceptor, resp)
-			if err != nil {
-				r.updateStatusError(ctx, acceptor, err)
+			if err := r.createOrUpdateK8sSecret(ctx, acceptor, resp); err != nil {
+				r.updateStatusError(ctx, acceptor, KubernetesError, err)
 				return ctrl.Result{}, err
 			}
 		}
 		// Store the state in the status.
-		err := r.updateStatus(ctx, acceptor, secretResourceVersion)
-		return ctrl.Result{}, err
-	} else if err != nil {
-		r.Log.Error(err, "failed to get Peering from Consul", "name", req.Name)
+		err := r.updateStatus(ctx, req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
 	// TODO(peering): Verify that the existing peering in Consul is an acceptor peer. If it is a dialing peer, an error should be thrown.
 
-	// If the peering does exist in Consul, figure out whether to generate and store a new token by comparing the secret
-	// in the status to the resource version of the secret. If no secret is specified in the status, shouldGenerate will
-	// be set to true.
-	var shouldGenerate bool
-	var nameChanged bool
-	if statusSecretSet {
-		shouldGenerate, nameChanged, err = shouldGenerateToken(acceptor, existingStatusSecret)
-		if err != nil {
-			r.updateStatusError(ctx, acceptor, err)
-			return ctrl.Result{}, err
-		}
-	} else {
-		shouldGenerate = true
+	r.Log.Info("peering exists in Consul")
+
+	// If the peering does exist in Consul, figure out whether to generate and store a new token.
+	shouldGenerate, nameChanged, err := shouldGenerateToken(acceptor, existingSecret)
+	if err != nil {
+		r.updateStatusError(ctx, acceptor, InternalError, err)
+		return ctrl.Result{}, err
 	}
 
 	if shouldGenerate {
 		// Generate and store the peering token.
 		var resp *api.PeeringGenerateTokenResponse
-		if resp, err = r.generateToken(ctx, acceptor.Name); err != nil {
+		r.Log.Info("generating new token for an existing peering")
+		if resp, err = r.generateToken(ctx, acceptor.Name, serverExternalAddresses); err != nil {
 			return ctrl.Result{}, err
 		}
 		if acceptor.Secret().Backend == "kubernetes" {
-			secretResourceVersion, err = r.createOrUpdateK8sSecret(ctx, acceptor, resp)
-			if err != nil {
+			if err = r.createOrUpdateK8sSecret(ctx, acceptor, resp); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
 		// Delete the existing secret if the name changed. This needs to come before updating the status if we do generate a new token.
-		if nameChanged {
-			if existingStatusSecret != nil {
-				err := r.Client.Delete(ctx, existingStatusSecret)
-				if err != nil {
-					r.updateStatusError(ctx, acceptor, err)
-					return ctrl.Result{}, err
-				}
+		if nameChanged && acceptor.SecretRef() != nil {
+			r.Log.Info("stale secret in status; deleting stale secret", "name", acceptor.Name, "secret-name", acceptor.SecretRef().Name)
+			if err = r.deleteK8sSecret(ctx, acceptor.SecretRef().Name, acceptor.Namespace); err != nil {
+				r.updateStatusError(ctx, acceptor, KubernetesError, err)
+				return ctrl.Result{}, err
 			}
 		}
 
 		// Store the state in the status.
-		err := r.updateStatus(ctx, acceptor, secretResourceVersion)
+		err := r.updateStatus(ctx, req.NamespacedName)
 		return ctrl.Result{}, err
 	}
 
@@ -194,44 +208,58 @@ func (r *PeeringAcceptorController) Reconcile(ctx context.Context, req ctrl.Requ
 
 // shouldGenerateToken returns whether a token should be generated, and whether the name of the secret has changed. It
 // compares the spec secret's name/key/backend and resource version with the name/key/backend and resource version of the status secret's.
-func shouldGenerateToken(acceptor *consulv1alpha1.PeeringAcceptor, existingStatusSecret *corev1.Secret) (shouldGenerate bool, nameChanged bool, err error) {
-	if acceptor.SecretRef() == nil {
-		return false, false, errors.New("shouldGenerateToken was called with an empty fields in the existing status")
-	}
-	// Compare the existing name, key, and backend.
-	if acceptor.SecretRef().Name != acceptor.Secret().Name {
-		return true, true, nil
-	}
-	if acceptor.SecretRef().Key != acceptor.Secret().Key {
-		return true, false, nil
-	}
-	// TODO(peering): remove this when validation webhook exists.
-	if acceptor.SecretRef().Backend != acceptor.Secret().Backend {
-		return false, false, errors.New("PeeringAcceptor backend cannot be changed")
-	}
-	// Compare the existing secret resource version.
-	// Get the secret specified by the status, make sure it matches the status' secret.ResourceVersion.
-	if existingStatusSecret != nil {
-		if existingStatusSecret.ResourceVersion != acceptor.SecretRef().ResourceVersion {
+func shouldGenerateToken(acceptor *consulv1alpha1.PeeringAcceptor, existingSecret *corev1.Secret) (shouldGenerate bool, nameChanged bool, err error) {
+	if acceptor.SecretRef() != nil {
+		// Compare the existing name, key, and backend.
+		if acceptor.SecretRef().Name != acceptor.Secret().Name {
+			return true, true, nil
+		}
+		if acceptor.SecretRef().Key != acceptor.Secret().Key {
 			return true, false, nil
 		}
+		// TODO(peering): remove this when validation webhook exists.
+		if acceptor.SecretRef().Backend != acceptor.Secret().Backend {
+			return false, false, errors.New("PeeringAcceptor backend cannot be changed")
+		}
+		if peeringVersionString, ok := acceptor.Annotations[annotationPeeringVersion]; ok {
+			peeringVersion, err := strconv.ParseUint(peeringVersionString, 10, 64)
+			if err != nil {
+				return false, false, err
+			}
+			if acceptor.Status.LatestPeeringVersion == nil || *acceptor.Status.LatestPeeringVersion < peeringVersion {
+				return true, false, nil
+			}
+		}
+	}
 
-	} else {
+	if existingSecret == nil {
 		return true, false, nil
 	}
+
 	return false, false, nil
 }
 
 // updateStatus updates the peeringAcceptor's secret in the status.
-func (r *PeeringAcceptorController) updateStatus(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor, secretResourceVersion string) error {
-	acceptor.Status.SecretRef = &consulv1alpha1.SecretRefStatus{
-		Secret:          *acceptor.Secret(),
-		ResourceVersion: secretResourceVersion,
+func (r *PeeringAcceptorController) updateStatus(ctx context.Context, acceptorObjKey types.NamespacedName) error {
+	// Get the latest resource before we update it.
+	acceptor := &consulv1alpha1.PeeringAcceptor{}
+	if err := r.Client.Get(ctx, acceptorObjKey, acceptor); err != nil {
+		return fmt.Errorf("error fetching acceptor resource before status update: %w", err)
 	}
-	acceptor.Status.LastReconcileTime = &metav1.Time{Time: time.Now()}
-	acceptor.Status.ReconcileError = &consulv1alpha1.ReconcileErrorStatus{
-		Error:   pointerToBool(false),
-		Message: pointerToString(""),
+	acceptor.Status.SecretRef = &consulv1alpha1.SecretRefStatus{
+		Secret: *acceptor.Secret(),
+	}
+	acceptor.Status.LastSyncedTime = &metav1.Time{Time: time.Now()}
+	acceptor.SetSyncedCondition(corev1.ConditionTrue, "", "")
+	if peeringVersionString, ok := acceptor.Annotations[annotationPeeringVersion]; ok {
+		peeringVersion, err := strconv.ParseUint(peeringVersionString, 10, 64)
+		if err != nil {
+			r.Log.Error(err, "failed to update PeeringAcceptor status", "name", acceptor.Name, "namespace", acceptor.Namespace)
+			return err
+		}
+		if acceptor.Status.LatestPeeringVersion == nil || *acceptor.Status.LatestPeeringVersion < peeringVersion {
+			acceptor.Status.LatestPeeringVersion = pointer.Uint64(peeringVersion)
+		}
 	}
 	err := r.Status().Update(ctx, acceptor)
 	if err != nil {
@@ -241,13 +269,8 @@ func (r *PeeringAcceptorController) updateStatus(ctx context.Context, acceptor *
 }
 
 // updateStatusError updates the peeringAcceptor's ReconcileError in the status.
-func (r *PeeringAcceptorController) updateStatusError(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor, reconcileErr error) {
-	acceptor.Status.ReconcileError = &consulv1alpha1.ReconcileErrorStatus{
-		Error:   pointerToBool(true),
-		Message: pointerToString(reconcileErr.Error()),
-	}
-
-	acceptor.Status.LastReconcileTime = &metav1.Time{Time: time.Now()}
+func (r *PeeringAcceptorController) updateStatusError(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor, reason string, reconcileErr error) {
+	acceptor.SetSyncedCondition(corev1.ConditionFalse, reason, reconcileErr.Error())
 	err := r.Status().Update(ctx, acceptor)
 	if err != nil {
 		r.Log.Error(err, "failed to update PeeringAcceptor status", "name", acceptor.Name, "namespace", acceptor.Namespace)
@@ -271,43 +294,34 @@ func (r *PeeringAcceptorController) getExistingSecret(ctx context.Context, name 
 
 // createOrUpdateK8sSecret creates a secret and uses the controller's K8s client to apply the secret. It checks if
 // there's an existing secret with the same name and makes sure to update the existing secret if so.
-func (r *PeeringAcceptorController) createOrUpdateK8sSecret(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor, resp *api.PeeringGenerateTokenResponse) (string, error) {
+func (r *PeeringAcceptorController) createOrUpdateK8sSecret(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor, resp *api.PeeringGenerateTokenResponse) error {
 	secretName := acceptor.Secret().Name
 	secretNamespace := acceptor.Namespace
 	secret := createSecret(secretName, secretNamespace, acceptor.Secret().Key, resp.PeeringToken)
 	existingSecret, err := r.getExistingSecret(ctx, secretName, secretNamespace)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if existingSecret != nil {
 		if err := r.Client.Update(ctx, secret); err != nil {
-			return "", err
+			return err
 		}
 
 	} else {
 		if err := r.Client.Create(ctx, secret); err != nil {
-			return "", err
+			return err
 		}
 	}
-	// The newly created or updated secret should exist at this point, so we can get it and return the resourceVersion.
-	newSecret := &corev1.Secret{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, newSecret); err != nil {
-		return "", err
-	}
-
-	return newSecret.ResourceVersion, nil
+	return nil
 }
 
-func (r *PeeringAcceptorController) deleteK8sSecret(ctx context.Context, acceptor *consulv1alpha1.PeeringAcceptor) error {
-	secretName := acceptor.Secret().Name
-	secretNamespace := acceptor.Namespace
-	secret := createSecret(secretName, secretNamespace, "", "")
-	existingSecret, err := r.getExistingSecret(ctx, secretName, secretNamespace)
+func (r *PeeringAcceptorController) deleteK8sSecret(ctx context.Context, name, namespace string) error {
+	existingSecret, err := r.getExistingSecret(ctx, name, namespace)
 	if err != nil {
 		return err
 	}
 	if existingSecret != nil {
-		if err := r.Client.Delete(ctx, secret); err != nil {
+		if err := r.Client.Delete(ctx, existingSecret); err != nil {
 			return err
 		}
 	}
@@ -318,13 +332,20 @@ func (r *PeeringAcceptorController) deleteK8sSecret(ctx context.Context, accepto
 func (r *PeeringAcceptorController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&consulv1alpha1.PeeringAcceptor{}).
-		Complete(r)
+		Watches(
+			&source.Kind{Type: &corev1.Secret{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForPeeringTokens),
+			builder.WithPredicates(predicate.NewPredicateFuncs(r.filterPeeringAcceptors)),
+		).Complete(r)
 }
 
 // generateToken is a helper function that calls the Consul api to generate a token for the peer.
-func (r *PeeringAcceptorController) generateToken(ctx context.Context, peerName string) (*api.PeeringGenerateTokenResponse, error) {
+func (r *PeeringAcceptorController) generateToken(ctx context.Context, peerName string, serverExternalAddresses []string) (*api.PeeringGenerateTokenResponse, error) {
 	req := api.PeeringGenerateTokenRequest{
 		PeerName: peerName,
+	}
+	if len(serverExternalAddresses) > 0 {
+		req.ServerExternalAddresses = serverExternalAddresses
 	}
 	resp, _, err := r.ConsulClient.Peerings().GenerateToken(ctx, req, nil)
 	if err != nil {
@@ -344,22 +365,125 @@ func (r *PeeringAcceptorController) deletePeering(ctx context.Context, peerName 
 	return nil
 }
 
+// requestsForPeeringTokens creates a slice of requests for the peering acceptor controller.
+// It enqueues a request for each acceptor that needs to be reconciled. It iterates through
+// the list of acceptors and creates a request for the acceptor that has the same secret as it's
+// secretRef and that of the updated secret that is being watched.
+// We compare it to the secret in the status as the resource has created the secret.
+func (r *PeeringAcceptorController) requestsForPeeringTokens(object client.Object) []reconcile.Request {
+	r.Log.Info("received update for Peering Token Secret", "name", object.GetName(), "namespace", object.GetNamespace())
+
+	// Get the list of all acceptors.
+	var acceptorList consulv1alpha1.PeeringAcceptorList
+	if err := r.Client.List(r.Context, &acceptorList); err != nil {
+		r.Log.Error(err, "failed to list Peering Acceptors")
+		return []ctrl.Request{}
+	}
+	for _, acceptor := range acceptorList.Items {
+		if acceptor.SecretRef() != nil && acceptor.SecretRef().Backend == "kubernetes" {
+			if acceptor.SecretRef().Name == object.GetName() && acceptor.Namespace == object.GetNamespace() {
+				return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: acceptor.Namespace, Name: acceptor.Name}}}
+			}
+		}
+	}
+	return []ctrl.Request{}
+}
+
+func (r *PeeringAcceptorController) getExposeServersServiceAddresses() ([]string, error) {
+	r.Log.Info("getting external address from expose-servers service", "name", r.ExposeServersServiceName)
+	var serverExternalAddresses []string
+
+	serverService := &corev1.Service{}
+	key := types.NamespacedName{
+		Name:      r.ExposeServersServiceName,
+		Namespace: r.ReleaseNamespace,
+	}
+	err := r.Client.Get(r.Context, key, serverService)
+	if err != nil {
+		return nil, err
+	}
+	switch serverService.Spec.Type {
+	case corev1.ServiceTypeNodePort:
+		nodes := corev1.NodeList{}
+		err := r.Client.List(r.Context, &nodes)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes.Items) == 0 {
+			return nil, fmt.Errorf("no nodes were found for scraping server addresses from expose-servers service")
+		}
+		var grpcNodePort int32
+		for _, port := range serverService.Spec.Ports {
+			if port.Name == "grpc" {
+				grpcNodePort = port.NodePort
+			}
+		}
+		if grpcNodePort == 0 {
+			return nil, fmt.Errorf("no grpc port was found for expose-servers service")
+		}
+		for _, node := range nodes.Items {
+			addrs := node.Status.Addresses
+			for _, addr := range addrs {
+				if addr.Type == corev1.NodeInternalIP {
+					serverExternalAddresses = append(serverExternalAddresses, fmt.Sprintf("%s:%d", addr.Address, grpcNodePort))
+				}
+			}
+		}
+		if len(serverExternalAddresses) == 0 {
+			return nil, fmt.Errorf("no server addresses were scraped from expose-servers service")
+		}
+		return serverExternalAddresses, nil
+	case corev1.ServiceTypeLoadBalancer:
+		lbAddrs := serverService.Status.LoadBalancer.Ingress
+		if len(lbAddrs) < 1 {
+			return nil, fmt.Errorf("unable to find load balancer address for %s service, retrying", r.ExposeServersServiceName)
+		}
+		for _, lbAddr := range lbAddrs {
+			// When the service is of type load balancer, the grpc port is hardcoded to 8502.
+			if lbAddr.IP != "" {
+				serverExternalAddresses = append(serverExternalAddresses, fmt.Sprintf("%s:%s", lbAddr.IP, "8502"))
+			}
+			if lbAddr.Hostname != "" {
+				serverExternalAddresses = append(serverExternalAddresses, fmt.Sprintf("%s:%s", lbAddr.Hostname, "8502"))
+			}
+		}
+		if len(serverExternalAddresses) == 0 {
+			return nil, fmt.Errorf("unable to find load balancer address for %s service, retrying", r.ExposeServersServiceName)
+		}
+	default:
+		return nil, fmt.Errorf("only NodePort and LoadBalancer service types are supported")
+	}
+	return serverExternalAddresses, nil
+}
+
+// filterPeeringAcceptors receives meta and object information for Kubernetes resources that are being watched,
+// which in this case are Secrets. It only returns true if the Secret is a Peering Token Secret. It reads the labels
+// from the meta of the resource and uses the values of the "consul.hashicorp.com/peering-token" label to validate that
+// the Secret is a Peering Token Secret.
+func (r *PeeringAcceptorController) filterPeeringAcceptors(object client.Object) bool {
+	secretLabels := object.GetLabels()
+	isPeeringToken, ok := secretLabels[labelPeeringToken]
+	if !ok {
+		return false
+	}
+	return isPeeringToken == "true"
+}
+
 // createSecret is a helper function that creates a corev1.Secret when provided inputs.
 func createSecret(name, namespace, key, value string) *corev1.Secret {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			Labels: map[string]string{
+				labelPeeringToken: "true",
+			},
 		},
 		Data: map[string][]byte{
 			key: []byte(value),
 		},
 	}
 	return secret
-}
-
-func pointerToString(s string) *string {
-	return &s
 }
 
 // containsString returns true if s is in slice.

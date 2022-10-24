@@ -19,26 +19,147 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// TestReconcileCreateUpdatePeeringAcceptor creates a peering acceptor.
-func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
+// TestReconcile_CreateUpdatePeeringAcceptor creates a peering acceptor.
+func TestReconcile_CreateUpdatePeeringAcceptor(t *testing.T) {
 	t.Parallel()
 	nodeName := "test-node"
 	cases := []struct {
-		name                   string
-		k8sObjects             func() []runtime.Object
-		expectedConsulPeerings []*api.Peering
-		expectedK8sSecrets     func() []*corev1.Secret
-		expErr                 string
-		expectedStatus         *v1alpha1.PeeringAcceptorStatus
-		expectDeletedK8sSecret *types.NamespacedName
-		initialConsulPeerName  string
+		name                    string
+		k8sObjects              func() []runtime.Object
+		expectedConsulPeerings  []*api.Peering
+		expectedK8sSecrets      func() []*corev1.Secret
+		expErr                  string
+		expectedStatus          *v1alpha1.PeeringAcceptorStatus
+		expectDeletedK8sSecret  *types.NamespacedName
+		initialConsulPeerName   string
+		externalAddresses       []string
+		readServerExposeService bool
+		expectedTokenAddresses  []string
 	}{
 		{
 			name: "New PeeringAcceptor creates a peering in Consul and generates a token",
+			k8sObjects: func() []runtime.Object {
+				acceptor := &v1alpha1.PeeringAcceptor{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.PeeringAcceptorSpec{
+						Peer: &v1alpha1.Peer{
+							Secret: &v1alpha1.Secret{
+								Name:    "acceptor-created-secret",
+								Key:     "data",
+								Backend: "kubernetes",
+							},
+						},
+					},
+				}
+				return []runtime.Object{acceptor}
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+				},
+			},
+			expectedConsulPeerings: []*api.Peering{
+				{
+					Name: "acceptor-created",
+				},
+			},
+			expectedK8sSecrets: func() []*corev1.Secret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created-secret",
+						Namespace: "default",
+					},
+					StringData: map[string]string{
+						"data": "tokenstub",
+					},
+				}
+				return []*corev1.Secret{secret}
+			},
+		},
+		{
+			name:                    "PeeringAcceptor generates a token with expose server addresses",
+			readServerExposeService: true,
+			expectedTokenAddresses:  []string{"1.1.1.1:8503"},
+			k8sObjects: func() []runtime.Object {
+				service := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "default",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeLoadBalancer,
+					},
+					Status: corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{
+								{
+									IP: "1.1.1.1",
+								},
+							},
+						},
+					},
+				}
+				acceptor := &v1alpha1.PeeringAcceptor{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.PeeringAcceptorSpec{
+						Peer: &v1alpha1.Peer{
+							Secret: &v1alpha1.Secret{
+								Name:    "acceptor-created-secret",
+								Key:     "data",
+								Backend: "kubernetes",
+							},
+						},
+					},
+				}
+				return []runtime.Object{acceptor, service}
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+				},
+			},
+			expectedConsulPeerings: []*api.Peering{
+				{
+					Name: "acceptor-created",
+				},
+			},
+			expectedK8sSecrets: func() []*corev1.Secret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created-secret",
+						Namespace: "default",
+					},
+					StringData: map[string]string{
+						"data": "tokenstub",
+					},
+				}
+				return []*corev1.Secret{secret}
+			},
+		},
+		{
+			name:                   "PeeringAcceptor generates a token with external addresses specified",
+			externalAddresses:      []string{"1.1.1.1:8503", "2.2.2.2:8503"},
+			expectedTokenAddresses: []string{"1.1.1.1:8503", "2.2.2.2:8503"},
 			k8sObjects: func() []runtime.Object {
 				acceptor := &v1alpha1.PeeringAcceptor{
 					ObjectMeta: metav1.ObjectMeta{
@@ -133,12 +254,15 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 			},
 		},
 		{
-			name: "PeeringAcceptor status secret exists and has different contents",
+			name: "PeeringAcceptor version annotation is updated",
 			k8sObjects: func() []runtime.Object {
 				acceptor := &v1alpha1.PeeringAcceptor{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "acceptor-created",
 						Namespace: "default",
+						Annotations: map[string]string{
+							annotationPeeringVersion: "2",
+						},
 					},
 					Spec: v1alpha1.PeeringAcceptorSpec{
 						Peer: &v1alpha1.Peer{
@@ -153,24 +277,14 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 						SecretRef: &v1alpha1.SecretRefStatus{
 							Secret: v1alpha1.Secret{
 								Name:    "acceptor-created-secret",
-								Key:     "some-old-key",
+								Key:     "data",
 								Backend: "kubernetes",
 							},
 							ResourceVersion: "some-old-sha",
 						},
 					},
 				}
-				secret := createSecret("acceptor-created-secret", "default", "some-old-key", "some-old-data")
-				secret.OwnerReferences = []metav1.OwnerReference{
-					{
-						APIVersion:         "consul.hashicorp.com/v1alpha1",
-						Kind:               "PeeringAcceptor",
-						Name:               "acceptor-created",
-						UID:                "",
-						Controller:         pointerToBool(true),
-						BlockOwnerDeletion: pointerToBool(true),
-					},
-				}
+				secret := createSecret("acceptor-created-secret", "default", "data", "some-old-data")
 				return []runtime.Object{acceptor, secret}
 			},
 			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
@@ -181,6 +295,7 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 						Backend: "kubernetes",
 					},
 				},
+				LatestPeeringVersion: pointer.Uint64(2),
 			},
 			expectedConsulPeerings: []*api.Peering{
 				{
@@ -202,7 +317,7 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 			initialConsulPeerName: "acceptor-created",
 		},
 		{
-			name: "PeeringAcceptor status secret exists and there's no peering in Consul",
+			name: "PeeringAcceptor status secret exists and doesn't match spec secret when there's no peering in Consul",
 			k8sObjects: func() []runtime.Object {
 				acceptor := &v1alpha1.PeeringAcceptor{
 					ObjectMeta: metav1.ObjectMeta{
@@ -225,7 +340,6 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 								Key:     "some-old-key",
 								Backend: "kubernetes",
 							},
-							ResourceVersion: "some-old-sha",
 						},
 					},
 				}
@@ -287,7 +401,6 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 								Key:     "some-old-key",
 								Backend: "kubernetes",
 							},
-							ResourceVersion: "some-old-sha",
 						},
 					},
 				}
@@ -326,6 +439,111 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 			},
 			initialConsulPeerName: "acceptor-created",
 		},
+		{
+			name: "Peering exists in Consul, but secret doesn't",
+			k8sObjects: func() []runtime.Object {
+				acceptor := &v1alpha1.PeeringAcceptor{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.PeeringAcceptorSpec{
+						Peer: &v1alpha1.Peer{
+							Secret: &v1alpha1.Secret{
+								Name:    "acceptor-created-secret",
+								Key:     "data",
+								Backend: "kubernetes",
+							},
+						},
+					},
+					Status: v1alpha1.PeeringAcceptorStatus{
+						SecretRef: &v1alpha1.SecretRefStatus{
+							Secret: v1alpha1.Secret{
+								Name:    "acceptor-created-secret",
+								Key:     "data",
+								Backend: "kubernetes",
+							},
+						},
+					},
+				}
+				return []runtime.Object{acceptor}
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+				},
+			},
+			expectedConsulPeerings: []*api.Peering{
+				{
+					Name: "acceptor-created",
+				},
+			},
+			expectedK8sSecrets: func() []*corev1.Secret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created-secret",
+						Namespace: "default",
+					},
+					StringData: map[string]string{
+						"data": "tokenstub",
+					},
+				}
+				return []*corev1.Secret{secret}
+			},
+			initialConsulPeerName: "acceptor-created",
+		},
+		{
+			name: "Peering exists in Consul, but secret doesn't and status is not set",
+			k8sObjects: func() []runtime.Object {
+				acceptor := &v1alpha1.PeeringAcceptor{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.PeeringAcceptorSpec{
+						Peer: &v1alpha1.Peer{
+							Secret: &v1alpha1.Secret{
+								Name:    "acceptor-created-secret",
+								Key:     "data",
+								Backend: "kubernetes",
+							},
+						},
+					},
+				}
+				return []runtime.Object{acceptor}
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+				},
+			},
+			expectedConsulPeerings: []*api.Peering{
+				{
+					Name: "acceptor-created",
+				},
+			},
+			expectedK8sSecrets: func() []*corev1.Secret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "acceptor-created-secret",
+						Namespace: "default",
+					},
+					StringData: map[string]string{
+						"data": "tokenstub",
+					},
+				}
+				return []*corev1.Secret{secret}
+			},
+			initialConsulPeerName: "acceptor-created",
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -360,10 +578,14 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 
 			// Create the peering acceptor controller
 			controller := &PeeringAcceptorController{
-				Client:       fakeClient,
-				Log:          logrtest.TestLogger{T: t},
-				ConsulClient: consulClient,
-				Scheme:       s,
+				Client:                    fakeClient,
+				TokenServerAddresses:      tt.externalAddresses,
+				ReadServerExternalService: tt.readServerExposeService,
+				ExposeServersServiceName:  "test-expose-servers",
+				ReleaseNamespace:          "default",
+				Log:                       logrtest.TestLogger{T: t},
+				ConsulClient:              consulClient,
+				Scheme:                    s,
 			}
 			namespacedName := types.NamespacedName{
 				Name:      "acceptor-created",
@@ -396,6 +618,8 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 			require.NoError(t, err)
 			expSecrets := tt.expectedK8sSecrets()
 			require.Equal(t, expSecrets[0].Name, createdSecret.Name)
+			require.Contains(t, createdSecret.Labels, labelPeeringToken)
+			require.Equal(t, createdSecret.Labels[labelPeeringToken], "true")
 			// This assertion needs to be on StringData rather than Data because in the fake K8s client the contents are
 			// stored in StringData if that's how the secret was initialized in the fake client. In a real cluster, this
 			// StringData is an input only field, and shouldn't be read from.
@@ -409,6 +633,11 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 			require.Contains(t, string(decodedTokenData), "\"CA\":null")
 			require.Contains(t, string(decodedTokenData), "\"ServerAddresses\"")
 			require.Contains(t, string(decodedTokenData), "\"ServerName\":\"server.dc1.consul\"")
+			if len(tt.expectedTokenAddresses) > 0 {
+				for _, addr := range tt.externalAddresses {
+					require.Contains(t, string(decodedTokenData), addr)
+				}
+			}
 
 			// Get the reconciled PeeringAcceptor and make assertions on the status
 			acceptor := &v1alpha1.PeeringAcceptor{}
@@ -419,6 +648,7 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 				require.Equal(t, tt.expectedStatus.SecretRef.Name, acceptor.SecretRef().Name)
 				require.Equal(t, tt.expectedStatus.SecretRef.Key, acceptor.SecretRef().Key)
 				require.Equal(t, tt.expectedStatus.SecretRef.Backend, acceptor.SecretRef().Backend)
+				require.Equal(t, tt.expectedStatus.LatestPeeringVersion, acceptor.Status.LatestPeeringVersion)
 			}
 			// Check that old secret was deleted.
 			if tt.expectDeletedK8sSecret != nil {
@@ -430,14 +660,13 @@ func TestReconcileCreateUpdatePeeringAcceptor(t *testing.T) {
 					t.Error("old secret should have been deleted but was not")
 				}
 			}
-
 		})
 	}
 }
 
-// TestReconcileDeletePeeringAcceptor reconciles a PeeringAcceptor resource that is no longer in Kubernetes, but still
+// TestReconcile_DeletePeeringAcceptor reconciles a PeeringAcceptor resource that is no longer in Kubernetes, but still
 // exists in Consul.
-func TestReconcileDeletePeeringAcceptor(t *testing.T) {
+func TestReconcile_DeletePeeringAcceptor(t *testing.T) {
 	// Add the default namespace.
 	ns := corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
 	acceptor := &v1alpha1.PeeringAcceptor{
@@ -515,6 +744,162 @@ func TestReconcileDeletePeeringAcceptor(t *testing.T) {
 	oldSecret := &corev1.Secret{}
 	err = fakeClient.Get(context.Background(), namespacedName, oldSecret)
 	require.EqualError(t, err, `secrets "acceptor-deleted" not found`)
+}
+
+// TestReconcile_AcceptorVersionAnnotation tests the behavior of Reconcile for various
+// scenarios involving the user setting the version annotation.
+func TestReconcile_VersionAnnotation(t *testing.T) {
+	t.Parallel()
+	nodeName := "test-node"
+	cases := map[string]struct {
+		annotations    map[string]string
+		expErr         string
+		expectedStatus *v1alpha1.PeeringAcceptorStatus
+	}{
+		"fails if annotation is not a number": {
+			annotations: map[string]string{
+				annotationPeeringVersion: "foo",
+			},
+			expErr: `strconv.ParseUint: parsing "foo": invalid syntax`,
+		},
+		"is no/op if annotation value is less than value in status": {
+			annotations: map[string]string{
+				annotationPeeringVersion: "2",
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+					ResourceVersion: "some-old-sha",
+				},
+				LatestPeeringVersion: pointer.Uint64(3),
+			},
+		},
+		"is no/op if annotation value is equal to value in status": {
+			annotations: map[string]string{
+				annotationPeeringVersion: "3",
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+					ResourceVersion: "some-old-sha",
+				},
+				LatestPeeringVersion: pointer.Uint64(3),
+			},
+		},
+		"updates if annotation value is greater than value in status": {
+			annotations: map[string]string{
+				annotationPeeringVersion: "4",
+			},
+			expectedStatus: &v1alpha1.PeeringAcceptorStatus{
+				SecretRef: &v1alpha1.SecretRefStatus{
+					Secret: v1alpha1.Secret{
+						Name:    "acceptor-created-secret",
+						Key:     "data",
+						Backend: "kubernetes",
+					},
+				},
+				LatestPeeringVersion: pointer.Uint64(4),
+			},
+		},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+			acceptor := &v1alpha1.PeeringAcceptor{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "acceptor-created",
+					Namespace:   "default",
+					Annotations: tt.annotations,
+				},
+				Spec: v1alpha1.PeeringAcceptorSpec{
+					Peer: &v1alpha1.Peer{
+						Secret: &v1alpha1.Secret{
+							Name:    "acceptor-created-secret",
+							Key:     "data",
+							Backend: "kubernetes",
+						},
+					},
+				},
+				Status: v1alpha1.PeeringAcceptorStatus{
+					SecretRef: &v1alpha1.SecretRefStatus{
+						Secret: v1alpha1.Secret{
+							Name:    "acceptor-created-secret",
+							Key:     "data",
+							Backend: "kubernetes",
+						},
+						ResourceVersion: "some-old-sha",
+					},
+					LatestPeeringVersion: pointer.Uint64(3),
+				},
+			}
+			secret := createSecret("acceptor-created-secret", "default", "data", "some-data")
+			// Create fake k8s client
+			k8sObjects := []runtime.Object{acceptor, secret, ns}
+
+			s := scheme.Scheme
+			s.AddKnownTypes(v1alpha1.GroupVersion, &v1alpha1.PeeringAcceptor{}, &v1alpha1.PeeringAcceptorList{})
+			fakeClient := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(k8sObjects...).Build()
+
+			// Create test consul server.
+			consul, err := testutil.NewTestServerConfigT(t, func(c *testutil.TestServerConfig) {
+				c.NodeName = nodeName
+			})
+			require.NoError(t, err)
+			defer consul.Stop()
+			consul.WaitForServiceIntentions(t)
+
+			cfg := &api.Config{
+				Address: consul.HTTPAddr,
+			}
+			consulClient, err := api.NewClient(cfg)
+			require.NoError(t, err)
+
+			_, _, err = consulClient.Peerings().GenerateToken(context.Background(), api.PeeringGenerateTokenRequest{PeerName: "acceptor-created"}, nil)
+			require.NoError(t, err)
+
+			// Create the peering acceptor controller
+			controller := &PeeringAcceptorController{
+				Client:       fakeClient,
+				Log:          logrtest.TestLogger{T: t},
+				ConsulClient: consulClient,
+				Scheme:       s,
+			}
+			namespacedName := types.NamespacedName{
+				Name:      "acceptor-created",
+				Namespace: "default",
+			}
+
+			resp, err := controller.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: namespacedName,
+			})
+			if tt.expErr != "" {
+				require.EqualError(t, err, tt.expErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.False(t, resp.Requeue)
+
+			// Get the reconciled PeeringAcceptor and make assertions on the status
+			acceptor = &v1alpha1.PeeringAcceptor{}
+			err = fakeClient.Get(context.Background(), namespacedName, acceptor)
+			require.NoError(t, err)
+			require.Contains(t, acceptor.Finalizers, FinalizerName)
+			if tt.expectedStatus != nil {
+				require.Equal(t, tt.expectedStatus.SecretRef.Name, acceptor.SecretRef().Name)
+				require.Equal(t, tt.expectedStatus.SecretRef.Key, acceptor.SecretRef().Key)
+				require.Equal(t, tt.expectedStatus.SecretRef.Backend, acceptor.SecretRef().Backend)
+				require.Equal(t, tt.expectedStatus.LatestPeeringVersion, acceptor.Status.LatestPeeringVersion)
+			}
+		})
+	}
 }
 
 func TestShouldGenerateToken(t *testing.T) {
@@ -635,43 +1020,6 @@ func TestShouldGenerateToken(t *testing.T) {
 			expErr:            nil,
 		},
 		{
-			name: "Contents changed",
-			peeringAcceptor: &v1alpha1.PeeringAcceptor{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "acceptor",
-					Namespace: "default",
-				},
-				Spec: v1alpha1.PeeringAcceptorSpec{
-					Peer: &v1alpha1.Peer{
-						Secret: &v1alpha1.Secret{
-							Name:    "acceptor-secret",
-							Key:     "data",
-							Backend: "kubernetes",
-						},
-					},
-				},
-				Status: v1alpha1.PeeringAcceptorStatus{
-					SecretRef: &v1alpha1.SecretRefStatus{
-						Secret: v1alpha1.Secret{
-							Name:    "acceptor-secret",
-							Key:     "data",
-							Backend: "kubernetes",
-						},
-						ResourceVersion: "1",
-					},
-				},
-			},
-			// existingSecret resource version is different from status, signalling the contents have changed.
-			existingSecret: func() *corev1.Secret {
-				secret := createSecret("acceptor-secret", "default", "data", "foo")
-				secret.ResourceVersion = "12345"
-				return secret
-			},
-			expShouldGenerate: true,
-			expNameChanged:    false,
-			expErr:            nil,
-		},
-		{
 			name: "Error case",
 			peeringAcceptor: &v1alpha1.PeeringAcceptor{
 				ObjectMeta: metav1.ObjectMeta{
@@ -755,11 +1103,12 @@ func TestAcceptorUpdateStatus(t *testing.T) {
 						Key:     "data",
 						Backend: "kubernetes",
 					},
-					ResourceVersion: "1234",
 				},
-				ReconcileError: &v1alpha1.ReconcileErrorStatus{
-					Error:   pointerToBool(false),
-					Message: pointerToString(""),
+				Conditions: v1alpha1.Conditions{
+					{
+						Type:   v1alpha1.ConditionSynced,
+						Status: corev1.ConditionTrue,
+					},
 				},
 			},
 		},
@@ -786,7 +1135,6 @@ func TestAcceptorUpdateStatus(t *testing.T) {
 							Key:     "old-key",
 							Backend: "kubernetes",
 						},
-						ResourceVersion: "old-resource-version",
 					},
 				},
 			},
@@ -798,11 +1146,12 @@ func TestAcceptorUpdateStatus(t *testing.T) {
 						Key:     "data",
 						Backend: "kubernetes",
 					},
-					ResourceVersion: "1234",
 				},
-				ReconcileError: &v1alpha1.ReconcileErrorStatus{
-					Error:   pointerToBool(false),
-					Message: pointerToString(""),
+				Conditions: v1alpha1.Conditions{
+					{
+						Type:   v1alpha1.ConditionSynced,
+						Status: corev1.ConditionTrue,
+					},
 				},
 			},
 		},
@@ -826,7 +1175,7 @@ func TestAcceptorUpdateStatus(t *testing.T) {
 				Scheme: s,
 			}
 
-			err := pac.updateStatus(context.Background(), tt.peeringAcceptor, tt.resourceVersion)
+			err := pac.updateStatus(context.Background(), types.NamespacedName{Name: tt.peeringAcceptor.Name, Namespace: tt.peeringAcceptor.Namespace})
 			require.NoError(t, err)
 
 			acceptor := &v1alpha1.PeeringAcceptor{}
@@ -840,7 +1189,7 @@ func TestAcceptorUpdateStatus(t *testing.T) {
 			require.Equal(t, tt.expStatus.SecretRef.Key, acceptor.SecretRef().Key)
 			require.Equal(t, tt.expStatus.SecretRef.Backend, acceptor.SecretRef().Backend)
 			require.Equal(t, tt.expStatus.SecretRef.ResourceVersion, acceptor.SecretRef().ResourceVersion)
-			require.Equal(t, *tt.expStatus.ReconcileError.Error, *acceptor.Status.ReconcileError.Error)
+			require.Equal(t, tt.expStatus.Conditions[0].Message, acceptor.Status.Conditions[0].Message)
 
 		})
 	}
@@ -872,9 +1221,13 @@ func TestAcceptorUpdateStatusError(t *testing.T) {
 			},
 			reconcileErr: errors.New("this is an error"),
 			expStatus: v1alpha1.PeeringAcceptorStatus{
-				ReconcileError: &v1alpha1.ReconcileErrorStatus{
-					Error:   pointerToBool(true),
-					Message: pointerToString("this is an error"),
+				Conditions: v1alpha1.Conditions{
+					{
+						Type:    v1alpha1.ConditionSynced,
+						Status:  corev1.ConditionFalse,
+						Reason:  InternalError,
+						Message: "this is an error",
+					},
 				},
 			},
 		},
@@ -895,17 +1248,23 @@ func TestAcceptorUpdateStatusError(t *testing.T) {
 					},
 				},
 				Status: v1alpha1.PeeringAcceptorStatus{
-					ReconcileError: &v1alpha1.ReconcileErrorStatus{
-						Error:   pointerToBool(false),
-						Message: pointerToString(""),
+					Conditions: v1alpha1.Conditions{
+						{
+							Type:   v1alpha1.ConditionSynced,
+							Status: corev1.ConditionTrue,
+						},
 					},
 				},
 			},
 			reconcileErr: errors.New("this is an error"),
 			expStatus: v1alpha1.PeeringAcceptorStatus{
-				ReconcileError: &v1alpha1.ReconcileErrorStatus{
-					Error:   pointerToBool(true),
-					Message: pointerToString("this is an error"),
+				Conditions: v1alpha1.Conditions{
+					{
+						Type:    v1alpha1.ConditionSynced,
+						Status:  corev1.ConditionFalse,
+						Reason:  InternalError,
+						Message: "this is an error",
+					},
 				},
 			},
 		},
@@ -929,7 +1288,7 @@ func TestAcceptorUpdateStatusError(t *testing.T) {
 				Scheme: s,
 			}
 
-			controller.updateStatusError(context.Background(), tt.acceptor, tt.reconcileErr)
+			controller.updateStatusError(context.Background(), tt.acceptor, InternalError, tt.reconcileErr)
 
 			acceptor := &v1alpha1.PeeringAcceptor{}
 			acceptorName := types.NamespacedName{
@@ -938,8 +1297,579 @@ func TestAcceptorUpdateStatusError(t *testing.T) {
 			}
 			err := fakeClient.Get(context.Background(), acceptorName, acceptor)
 			require.NoError(t, err)
-			require.Equal(t, *tt.expStatus.ReconcileError.Error, *acceptor.Status.ReconcileError.Error)
+			require.Equal(t, tt.expStatus.Conditions[0].Message, acceptor.Status.Conditions[0].Message)
 
 		})
 	}
+}
+
+func TestAcceptor_FilterPeeringAcceptor(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		secret *corev1.Secret
+		result bool
+	}{
+		"returns true if label is set to true": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+					Labels: map[string]string{
+						labelPeeringToken: "true",
+					},
+				},
+			},
+			result: true,
+		},
+		"returns false if label is set to false": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+					Labels: map[string]string{
+						labelPeeringToken: "false",
+					},
+				},
+			},
+			result: false,
+		},
+		"returns false if label is set to a non-true value": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+					Labels: map[string]string{
+						labelPeeringToken: "foo",
+					},
+				},
+			},
+			result: false,
+		},
+		"returns false if label is not set": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			result: false,
+		},
+	}
+
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			controller := PeeringAcceptorController{}
+			result := controller.filterPeeringAcceptors(tt.secret)
+			require.Equal(t, tt.result, result)
+		})
+	}
+}
+
+func TestAcceptor_RequestsForPeeringTokens(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		secret    *corev1.Secret
+		acceptors v1alpha1.PeeringAcceptorList
+		result    []reconcile.Request
+	}{
+		"secret matches existing acceptor": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			acceptors: v1alpha1.PeeringAcceptorList{
+				Items: []v1alpha1.PeeringAcceptor{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+				},
+			},
+			result: []reconcile.Request{
+				{
+					NamespacedName: types.NamespacedName{
+						Namespace: "test",
+						Name:      "peering",
+					},
+				},
+			},
+		},
+		"does not match if backend is not kubernetes": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			acceptors: v1alpha1.PeeringAcceptorList{
+				Items: []v1alpha1.PeeringAcceptor{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test",
+									Key:     "test",
+									Backend: "vault",
+								},
+							},
+						},
+					},
+				},
+			},
+			result: []reconcile.Request{},
+		},
+		"only matches with the correct acceptor": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			acceptors: v1alpha1.PeeringAcceptorList{
+				Items: []v1alpha1.PeeringAcceptor{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-1",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-2",
+							Namespace: "test-2",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-3",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test-2",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+				},
+			},
+			result: []reconcile.Request{
+				{
+					NamespacedName: types.NamespacedName{
+						Namespace: "test",
+						Name:      "peering-1",
+					},
+				},
+			},
+		},
+		"can match with zero acceptors": {
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "test",
+				},
+			},
+			acceptors: v1alpha1.PeeringAcceptorList{
+				Items: []v1alpha1.PeeringAcceptor{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-1",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "fest",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-2",
+							Namespace: "test-2",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "peering-3",
+							Namespace: "test",
+						},
+						Status: v1alpha1.PeeringAcceptorStatus{
+							SecretRef: &v1alpha1.SecretRefStatus{
+								Secret: v1alpha1.Secret{
+									Name:    "test-2",
+									Key:     "test",
+									Backend: "kubernetes",
+								},
+							},
+						},
+					},
+				},
+			},
+			result: []reconcile.Request{},
+		},
+	}
+
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := scheme.Scheme
+			s.AddKnownTypes(v1alpha1.GroupVersion, &v1alpha1.PeeringAcceptor{}, &v1alpha1.PeeringAcceptorList{})
+			fakeClient := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(tt.secret, &tt.acceptors).Build()
+			controller := PeeringAcceptorController{
+				Client: fakeClient,
+				Log:    logrtest.TestLogger{T: t},
+			}
+			result := controller.requestsForPeeringTokens(tt.secret)
+
+			require.Equal(t, tt.result, result)
+		})
+	}
+}
+
+func TestGetExposeServersServiceAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name             string
+		k8sObjects       func() []runtime.Object
+		releaseNamespace string
+		expAddresses     []string
+		expErr           string
+	}{
+		{
+			name:             "Valid LoadBalancer service",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeLoadBalancer,
+					},
+					Status: corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{
+								{
+									IP: "1.2.3.4",
+								},
+							},
+						},
+					},
+				}
+				return []runtime.Object{exposeServersService}
+			},
+			expAddresses: []string{"1.2.3.4:8502"},
+		},
+		{
+			name:             "Valid LoadBalancer service with Hostname",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeLoadBalancer,
+					},
+					Status: corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{
+								{
+									Hostname: "foo.bar.baz",
+								},
+							},
+						},
+					},
+				}
+				return []runtime.Object{exposeServersService}
+			},
+			expAddresses: []string{"foo.bar.baz:8502"},
+		},
+		{
+			name:             "LoadBalancer has no addresses",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeLoadBalancer,
+					},
+					Status: corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{},
+						},
+					},
+				}
+				return []runtime.Object{exposeServersService}
+			},
+			expErr: "unable to find load balancer address for test-expose-servers service, retrying",
+		},
+		{
+			name:             "LoadBalancer has empty IP",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeLoadBalancer,
+					},
+					Status: corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{
+								{
+									IP: "",
+								},
+							},
+						},
+					},
+				}
+				return []runtime.Object{exposeServersService}
+			},
+			expErr: "unable to find load balancer address for test-expose-servers service, retrying",
+		},
+		{
+			name:             "Valid NodePort service",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:     "grpc",
+								NodePort: 30100,
+							},
+						},
+					},
+					Status: corev1.ServiceStatus{},
+				}
+				node1 := createNode("fake-gke-node1", "", "10.1.1.1")
+				node2 := createNode("fake-gke-node2", "", "10.2.2.2")
+				node3 := createNode("fake-gke-node3", "", "10.3.3.3")
+				return []runtime.Object{exposeServersService, node1, node2, node3}
+			},
+			expAddresses: []string{"10.1.1.1:30100", "10.2.2.2:30100", "10.3.3.3:30100"},
+		},
+		{
+			name:             "Valid NodePort service ignores node external IPs",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:     "grpc",
+								NodePort: 30100,
+							},
+						},
+					},
+					Status: corev1.ServiceStatus{},
+				}
+				node1 := createNode("fake-gke-node1", "30.1.1.1", "10.1.1.1")
+				node2 := createNode("fake-gke-node2", "30.2.2.2", "10.2.2.2")
+				node3 := createNode("fake-gke-node3", "30.3.3.3", "10.3.3.3")
+				return []runtime.Object{exposeServersService, node1, node2, node3}
+			},
+			expAddresses: []string{"10.1.1.1:30100", "10.2.2.2:30100", "10.3.3.3:30100"},
+		},
+		{
+			name:             "Invalid NodePort service with only external IPs",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:     "grpc",
+								NodePort: 30100,
+							},
+						},
+					},
+					Status: corev1.ServiceStatus{},
+				}
+				node1 := createNode("fake-gke-node1", "30.1.1.1", "")
+				node2 := createNode("fake-gke-node2", "30.2.2.2", "")
+				node3 := createNode("fake-gke-node3", "30.3.3.3", "")
+				return []runtime.Object{exposeServersService, node1, node2, node3}
+			},
+			expErr: "no server addresses were scraped from expose-servers service",
+		},
+		{
+			name:             "Invalid NodePort service because no nodes exist to scrape addresses from",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:     "grpc",
+								NodePort: 30100,
+							},
+						},
+					},
+					Status: corev1.ServiceStatus{},
+				}
+				return []runtime.Object{exposeServersService}
+			},
+			expErr: "no nodes were found for scraping server addresses from expose-servers service",
+		},
+		{
+			name:             "Invalid NodePort service because no grpc port exists",
+			releaseNamespace: "test",
+			k8sObjects: func() []runtime.Object {
+				exposeServersService := &corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-expose-servers",
+						Namespace: "test",
+					},
+					Spec: corev1.ServiceSpec{
+						Type: corev1.ServiceTypeNodePort,
+						Ports: []corev1.ServicePort{
+							{
+								Name:     "not-grpc",
+								NodePort: 30100,
+							},
+						},
+					},
+					Status: corev1.ServiceStatus{},
+				}
+				node1 := createNode("fake-gke-node1", "30.1.1.1", "10.1.1.1")
+				node2 := createNode("fake-gke-node2", "30.2.2.2", "10.2.2.2")
+				node3 := createNode("fake-gke-node3", "30.3.3.3", "10.3.3.3")
+				return []runtime.Object{exposeServersService, node1, node2, node3}
+			},
+			expErr: "no grpc port was found for expose-servers service",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			// Add the default namespace.
+			ns := corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+			nsTest := corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test"}}
+			// Create fake k8s client
+			k8sObjects := append(tt.k8sObjects(), &ns, &nsTest)
+
+			s := scheme.Scheme
+			//s.AddKnownTypes(v1alpha1.GroupVersion, &v1alpha1.PeeringAcceptor{}, &v1alpha1.PeeringAcceptorList{})
+			fakeClient := fake.NewClientBuilder().WithScheme(s).WithRuntimeObjects(k8sObjects...).Build()
+
+			// Create the peering acceptor controller
+			controller := &PeeringAcceptorController{
+				Client:                   fakeClient,
+				Log:                      logrtest.TestLogger{T: t},
+				Scheme:                   s,
+				ReleaseNamespace:         tt.releaseNamespace,
+				ExposeServersServiceName: "test-expose-servers",
+			}
+
+			// Get addresses from expose-servers service.
+			addrs, err := controller.getExposeServersServiceAddresses()
+			if tt.expErr != "" {
+				require.EqualError(t, err, tt.expErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			// Assert all the expected addresses are there.
+			for _, expAddr := range tt.expAddresses {
+				require.Contains(t, addrs, expAddr)
+			}
+		})
+	}
+}
+
+// createNode is a test helper to create Kubernetes nodes.
+func createNode(name, externalIP, internalIP string) *corev1.Node {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{},
+		},
+	}
+	if externalIP != "" {
+		node.Status.Addresses = append(node.Status.Addresses, corev1.NodeAddress{Type: corev1.NodeExternalIP, Address: externalIP})
+	}
+	if internalIP != "" {
+		node.Status.Addresses = append(node.Status.Addresses, corev1.NodeAddress{Type: corev1.NodeInternalIP, Address: internalIP})
+	}
+	return node
 }
