@@ -167,6 +167,17 @@ func (w *MeshWebhook) consulDataplaneSidecar(namespace corev1.Namespace, pod cor
 		}
 	}
 
+	// If the `sidecar-proxy-prestop-delay` annotation is set, add a preStop hook to the container for the specified delay.
+	if delay, ok := pod.Annotations[constants.AnnotationSidecarProxyPreStopDelay]; ok {
+		container.Lifecycle = &corev1.Lifecycle{
+			PreStop: &corev1.Handler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"/bin/sh", "-c", "sleep", delay},
+				},
+			},
+		}
+	}
+
 	return container, nil
 }
 

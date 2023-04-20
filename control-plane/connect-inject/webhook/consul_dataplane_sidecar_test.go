@@ -459,6 +459,68 @@ func TestHandlerConsulDataplaneSidecar_ProxyHealthCheck_Multiport(t *testing.T) 
 	}
 }
 
+func TestHandlerConsulDataplaneSidecar_ProxyPreStopDelay(t *testing.T) {
+	h := MeshWebhook{
+		ConsulConfig:  &consul.Config{HTTPPort: 8500, GRPCPort: 8502},
+		ConsulAddress: "1.1.1.1",
+		LogLevel:      "info",
+	}
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-pod",
+			Annotations: map[string]string{
+				constants.AnnotationService:                  "web,web-admin",
+				constants.AnnotationUseProxyHealthCheck:      "true",
+				constants.AnnotationSidecarProxyPreStopDelay: "10", // 10 seconds
+			},
+		},
+
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "web",
+				},
+				{
+					Name: "web-side",
+				},
+				{
+					Name: "web-admin",
+				},
+			},
+			ServiceAccountName: "web",
+		},
+	}
+	multiPortInfos := []multiPortInfo{
+		{
+			serviceIndex: 0,
+			serviceName:  "web",
+		},
+		{
+			serviceIndex: 1,
+			serviceName:  "web-admin",
+		},
+	}
+
+	expectedLifecycle := corev1.Lifecycle{
+		PreStop: &corev1.Handler{
+			Exec: &corev1.ExecAction{
+				Command: []string{
+					"/bin/sh",
+					"-c",
+					"sleep",
+					"10",
+				},
+			},
+		},
+	}
+
+	for _, info := range multiPortInfos {
+		container, err := h.consulDataplaneSidecar(testNS, pod, info)
+		require.NoError(t, err)
+		require.Equal(t, container.Lifecycle.PreStop.Exec, expectedLifecycle.PreStop.Exec)
+	}
+}
+
 func TestHandlerConsulDataplaneSidecar_Multiport(t *testing.T) {
 	for _, aclsEnabled := range []bool{false, true} {
 		name := fmt.Sprintf("acls enabled: %t", aclsEnabled)
