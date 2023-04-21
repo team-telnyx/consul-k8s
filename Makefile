@@ -7,7 +7,7 @@ TELNYX_IMAGE = $(TELNYX_IMAGE_NAME):$(TELNYX_IMAGE_TAG)
 
 .PHONY: telnyx-control-plane-lint
 telnyx-control-plane-lint: ## Run linters in Docker
-	docker run --rm -ti -v $$(pwd):/app -w /app golangci/golangci-lint:v1.52.2 make control-plane-lint
+	docker run --rm -t -v $$(pwd):/app -w /app golangci/golangci-lint:v1.52.2 make control-plane-lint
 
 .PHONY: telnyx-build
 telnyx-build: ## Build consul-k8s-control-plane Docker image.
@@ -28,7 +28,7 @@ build: telnyx-control-plane-lint
 .PHONY: test
 test:
 	@echo "Tests are disabled yet"
-	#docker run -it -v $(CURDIR):/app -w /app golang:1.18.1 make control-plane-test
+	#docker run -t -v $(CURDIR):/app -w /app golang:1.18.1 make control-plane-test
 
 # ===========> Helm Targets
 
