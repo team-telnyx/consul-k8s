@@ -1,5 +1,33 @@
 VERSION = $(shell ./control-plane/build-support/scripts/version.sh control-plane/version/version.go)
 
+# ===========> Telnyx specific Targets
+TELNYX_IMAGE_NAME = registry.internal.telnyx.com/infra/consul-k8s-control-plane
+TELNYX_IMAGE_TAG = red
+TELNYX_IMAGE = $(TELNYX_IMAGE_NAME):$(TELNYX_IMAGE_TAG)
+
+.PHONY: telnyx-control-plane-lint
+telnyx-control-plane-lint: ## Run linters in Docker
+	docker run --rm -ti -v $$(pwd):/app -w /app golangci/golangci-lint:v1.52.2 make control-plane-lint
+
+.PHONY: telnyx-build
+telnyx-build: ## Build consul-k8s-control-plane Docker image.
+	@$(SHELL) $(CURDIR)/control-plane/build-support/scripts/build-local.sh -o linux -a "arm64 amd64"
+	@docker buildx create --use && docker buildx build -t '$(DEV_IMAGE)' \
+       --platform linux/amd64,linux/arm64 \
+       --target=dev \
+       --build-arg 'GIT_COMMIT=$(GIT_COMMIT)' \
+       --build-arg 'GIT_DIRTY=$(GIT_DIRTY)' \
+       --build-arg 'GIT_DESCRIBE=$(GIT_DESCRIBE)' \
+       -f $(CURDIR)/control-plane/Dockerfile $(CURDIR)/control-plane
+
+.PHONY: build
+build: telnyx-control-plane-lint
+	@make DEV_PUSH=0 DEV_IMAGE=$(TELNYX_IMAGE) telnyx-build
+
+.PHONY: test
+test:
+	docker run -it -v $(CURDIR):/app -w /app golang:1.18.1 make control-plane-test
+
 # ===========> Helm Targets
 
 gen-helm-docs: ## Generate Helm reference docs from values.yaml and update Consul website. Usage: make gen-helm-docs consul=<path-to-consul-repo>.
