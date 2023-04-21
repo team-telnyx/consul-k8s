@@ -1,0 +1,16 @@
+names               :
+  service           : consul-k8s-control-plane
+  github            : infra-oci-consul-k8s
+
+project             :
+  squad             : infra.core.squad
+  primary_maintainer: aitor
+  secondary_maintainer: nat
+  public_api        : false
+
+build:
+  allow_secret_plaintext: true
+  promote_to_dev:
+    branch_pattern: "main|release/.*"
+  version_suffix:
+    pattern: "telnyx-%c"

@@ -10,3 +10,7 @@ pkg/
 .idea/
 .vscode
 .bob/
+
+# Telnyx cusomisation
+VERSION
+**/coverage.out
