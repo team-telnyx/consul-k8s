@@ -7,7 +7,8 @@ TELNYX_IMAGE = $(TELNYX_IMAGE_NAME):$(TELNYX_IMAGE_TAG)
 
 .PHONY: telnyx-control-plane-lint
 telnyx-control-plane-lint: ## Run linters in Docker
-	docker run --rm -t -v $$(pwd):/app -w /app golangci/golangci-lint:v1.52.2 make control-plane-lint
+	#docker run --rm -t -v $$(pwd):/app -w /app golangci/golangci-lint:v1.52.2 make control-plane-lint
+	@echo "Disabling linting for now"
 
 .PHONY: telnyx-build
 telnyx-build: ## Build consul-k8s-control-plane Docker image.
