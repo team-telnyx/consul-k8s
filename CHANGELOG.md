@@ -2,7 +2,8 @@
 
 IMPROVEMENTS:
 
-* Add support for `consul.hashicorp.com/sidecar-proxy-prestop-delay` annotation.
+* Add unit tests for `consul.hashicorp.com/sidecar-proxy-prestop-delay` annotation.
+* Add config to build and deploy image in Telnyx pipelines.
 
 ## 0.49.5 (March 9, 2023)
 
