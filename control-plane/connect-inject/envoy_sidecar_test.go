@@ -488,6 +488,63 @@ func TestHandlerEnvoySidecar_UserVolumeMounts(t *testing.T) {
 	}
 }
 
+func TestHandlerEnvoySidecar_ProxyPreStopDelay(t *testing.T) {
+	cases := []struct {
+		name              string
+		pod               corev1.Pod
+		expectedLifecycle *corev1.Lifecycle
+		expErr            string
+	}{
+		{
+			name: "adding envoy proxy pre stop delay through annotation",
+			pod: corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						annotationSidecarProxyPreStopDelay: "10",
+					},
+				},
+			},
+			expectedLifecycle: &corev1.Lifecycle{
+				PostStart: nil,
+				PreStop: &corev1.Handler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/sh",
+							"-c",
+							"sleep 10",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "when no annotation is set, no lifecycle hook is added",
+			pod: corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{},
+				},
+			},
+			expectedLifecycle: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := MeshWebhook{
+				ImageConsul: "hashicorp/consul:latest",
+				ImageEnvoy:  "hashicorp/consul-k8s:latest",
+			}
+			c, err := h.envoySidecar(testNS, tc.pod, multiPortInfo{})
+			if tc.expErr == "" {
+				require.NoError(t, err)
+				require.Equal(t, tc.expectedLifecycle, c.Lifecycle)
+			} else {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.expErr)
+			}
+		})
+	}
+}
+
 func TestHandlerEnvoySidecar_Resources(t *testing.T) {
 	mem1 := resource.MustParse("100Mi")
 	mem2 := resource.MustParse("200Mi")
