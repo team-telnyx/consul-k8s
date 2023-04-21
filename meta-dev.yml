@@ -11,6 +11,6 @@ project             :
 build:
   allow_secret_plaintext: true
   promote_to_dev:
-    branch_pattern: "main|INFRA-.*|release/.*"
+    branch_pattern: "main|INFRA.*|release/.*"
   version_suffix:
     pattern: "telnyx-%c"
