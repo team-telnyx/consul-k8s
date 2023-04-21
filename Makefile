@@ -12,7 +12,7 @@ telnyx-control-plane-lint: ## Run linters in Docker
 .PHONY: telnyx-build
 telnyx-build: ## Build consul-k8s-control-plane Docker image.
 	@echo "$(VERSION)" > ./VERSION
-	@$(SHELL) $(CURDIR)/control-plane/build-support/scripts/build-local.sh -o linux -a "arm64 amd64"
+	@docker run --rm -t -v $(CURDIR):/app -w /app golang:1.18.1 /bin/bash /app/control-plane/build-support/scripts/build-local.sh -o linux -a "arm64 amd64"
 	@docker buildx create --use && docker buildx build -t '$(DEV_IMAGE)' \
        --platform linux/amd64,linux/arm64 \
        --target=dev \
