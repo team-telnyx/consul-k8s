@@ -1,3 +1,9 @@
+## 1.1.1-telnyx01 (April 20, 2023)
+
+IMPROVEMENTS:
+
+* Add support for `consul.hashicorp.com/sidecar-proxy-prestop-delay` annotation.
+
 ## 1.1.1 (March 31, 2023)
 
 IMPROVEMENTS:
