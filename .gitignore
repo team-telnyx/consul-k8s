@@ -9,3 +9,7 @@ bin/
 pkg/
 .idea/
 .vscode
+
+# Telnyx cusomisation
+VERSION
+**/coverage.out
