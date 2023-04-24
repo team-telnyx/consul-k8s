@@ -14,12 +14,13 @@ telnyx-control-plane-lint: ## Run linters in Docker
 telnyx-build: ## Build consul-k8s-control-plane Docker image.
 	@echo "$(VERSION)" > ./VERSION
 	docker run --rm -t -v $(CURDIR):/app -w /app golang:1.18.1 /bin/bash /app/control-plane/build-support/scripts/build-local.sh -o linux -a "arm64 amd64"
-	docker buildx create --use && docker buildx build -t '$(DEV_IMAGE)' \
-       --platform linux/amd64,linux/arm64 \
+	docker buildx create --use && docker buildx build -t $(DEV_IMAGE) \
+       --platform linux/amd64 \
        --target=dev \
        --build-arg 'GIT_COMMIT=$(GIT_COMMIT)' \
        --build-arg 'GIT_DIRTY=$(GIT_DIRTY)' \
        --build-arg 'GIT_DESCRIBE=$(GIT_DESCRIBE)' \
+       --output=type=docker \
        -f $(CURDIR)/control-plane/Dockerfile $(CURDIR)/control-plane
 
 .PHONY: build
