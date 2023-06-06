@@ -207,7 +207,7 @@ load _helpers
         . | tee /dev/stderr )
 
     local actual=$(echo "$object" |
-        yq -r '.spec.template.spec.volumes[2].secret.secretName' | tee /dev/stderr)
+        yq -r '.spec.template.spec.volumes[] | select(.name == "consul-server-cert") | .secret.secretName' | tee /dev/stderr)
     [ "${actual}" = "release-name-consul-server-cert" ]
 }
 
@@ -221,7 +221,7 @@ load _helpers
         . | tee /dev/stderr )
 
     local actual=$(echo "$object" |
-        yq -r '.spec.template.spec.volumes[2].secret.secretName' | tee /dev/stderr)
+        yq -r '.spec.template.spec.volumes[] | select(.name == "consul-server-cert") | .secret.secretName' | tee /dev/stderr)
     [ "${actual}" = "server-cert" ]
 }
 
@@ -346,6 +346,27 @@ load _helpers
 
   local command=$(echo "$object" |
       yq -r '.spec.template.spec.containers[0].command' | tee /dev/stderr)
+}
+
+#--------------------------------------------------------------------
+# extra-config
+
+@test "server/StatefulSet: has extra-config volume" {
+  cd `chart_dir`
+
+  # check that the extra-config volume is defined
+  local volume_name=$(helm template \
+      -s templates/server-statefulset.yaml \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.volumes[] | select(.name == "extra-config") | .name' | tee /dev/stderr)
+  [ "${volume_name}" = "extra-config" ]
+
+  # check that the consul container mounts the volume at /consul/extra-config
+  local mount_path=$(helm template \
+      -s templates/server-statefulset.yaml \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.containers[] | select(.name == "consul") | .volumeMounts[] | select(.name == "extra-config") | .mountPath' | tee /dev/stderr)
+  [ "${mount_path}" = "/consul/extra-config" ]
 }
 
 #--------------------------------------------------------------------
@@ -568,6 +589,35 @@ load _helpers
   [ "${actualBaz}" = "qux" ]
 }
 
+@test "server/StatefulSet: extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-statefulset.yaml  \
+      --set 'global.extraLabels.foo=bar' \
+      . | tee /dev/stderr)
+  local actualBar=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualBar}" = "bar" ]
+  local actualTemplateBar=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualTemplateBar}" = "bar" ]
+}
+
+@test "server/StatefulSet: multiple extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-statefulset.yaml  \
+      --set 'global.extraLabels.foo=bar' \
+      --set 'global.extraLabels.baz=qux' \
+      . | tee /dev/stderr)
+  local actualFoo=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  local actualBaz=$(echo "${actual}" | yq -r '.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualFoo}" = "bar" ]
+  [ "${actualBaz}" = "qux" ]
+  local actualTemplateFoo=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  local actualTemplateBaz=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualTemplateFoo}" = "bar" ]
+  [ "${actualTemplateBaz}" = "qux" ]
+}
+
 #--------------------------------------------------------------------
 # DNS
 
@@ -648,20 +698,6 @@ load _helpers
   [ "${actual}" = "/v1/agent/metrics" ]
 }
 
-@test "server/StatefulSet: when global.metrics.enableAgentMetrics=true, global.tls.enabled=true and global.tls.httpsOnly=true, fail" {
-  cd `chart_dir`
-  run helm template \
-      -s templates/server-statefulset.yaml  \
-      --set 'global.metrics.enabled=true'  \
-      --set 'global.metrics.enableAgentMetrics=true'  \
-      --set 'global.tls.enabled=true'  \
-      --set 'global.tls.httpsOnly=true'  \
-      .
-
-  [ "$status" -eq 1 ]
-  [[ "$output" =~ "global.metrics.enableAgentMetrics cannot be enabled if TLS (HTTPS only) is enabled" ]]
-}
-
 #--------------------------------------------------------------------
 # config-configmap
 
@@ -671,7 +707,7 @@ load _helpers
       -s templates/server-statefulset.yaml  \
       . | tee /dev/stderr |
       yq -r '.spec.template.metadata.annotations."consul.hashicorp.com/config-checksum"' | tee /dev/stderr)
-  [ "${actual}" = 8c29e583455a2e8d0372cbb884f00214d8b4ccf31f1647aab119778707ab56f8 ]
+  [ "${actual}" = 04cc39bf3f56ff39a2f4ae188fc37fc54b7775a073e8f97111eb37a548d7e229 ]
 }
 
 @test "server/StatefulSet: adds config-checksum annotation when extraConfig is provided" {
@@ -681,7 +717,7 @@ load _helpers
       --set 'server.extraConfig="{\"hello\": \"world\"}"' \
       . | tee /dev/stderr |
       yq -r '.spec.template.metadata.annotations."consul.hashicorp.com/config-checksum"' | tee /dev/stderr)
-  [ "${actual}" = 66fb7e1b861234b5291a0f2e464610febb721b358e6a6985f9b17d7a459edc50 ]
+  [ "${actual}" = e8d2e9535eb6e69eedebef725a66a8b47fd8845a77772f0e19911d2273b9b804 ]
 }
 
 @test "server/StatefulSet: adds config-checksum annotation when config is updated" {
@@ -691,7 +727,7 @@ load _helpers
       --set 'global.acls.manageSystemACLs=true' \
       . | tee /dev/stderr |
       yq -r '.spec.template.metadata.annotations."consul.hashicorp.com/config-checksum"' | tee /dev/stderr)
-  [ "${actual}" = 51c076418d5d7654ac239e16773cf4dbd3bc4af413db48e88340ca25536b57ad ]
+  [ "${actual}" = d5f4de988e9d51ff8ae91a24a1a990dc65ce046c0494836f6d0f0eae34108235 ]
 }
 
 #--------------------------------------------------------------------

@@ -435,7 +435,7 @@ func TestProcessUpstreams(t *testing.T) {
 			},
 			expErr: "upstream \"upstream1:1234:dc1\" is invalid: ProxyDefaults mesh gateway mode is neither \"local\" nor \"remote\"",
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = "bad-mode"
 				return pd
@@ -492,7 +492,7 @@ func TestProcessUpstreams(t *testing.T) {
 				},
 			},
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = api.MeshGatewayModeLocal
 				return pd
@@ -516,7 +516,7 @@ func TestProcessUpstreams(t *testing.T) {
 				},
 			},
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = api.MeshGatewayModeRemote
 				return pd
@@ -533,7 +533,7 @@ func TestProcessUpstreams(t *testing.T) {
 			},
 			expErr: "",
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = "remote"
 				return pd
@@ -634,7 +634,7 @@ func TestProcessUpstreams(t *testing.T) {
 				return pod1
 			},
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = "remote"
 				return pd
@@ -670,7 +670,7 @@ func TestProcessUpstreams(t *testing.T) {
 				return pod1
 			},
 			configEntry: func() api.ConfigEntry {
-				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "pd")
+				ce, _ := api.MakeConfigEntry(api.ProxyDefaults, "global")
 				pd := ce.(*api.ProxyConfigEntry)
 				pd.MeshGateway.Mode = "remote"
 				return pd
@@ -1187,6 +1187,7 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 		expectedProxySvcInstances  []*api.CatalogService
 		expectedAgentHealthChecks  []*api.AgentCheck
 		expErr                     string
+		useProxyHealthChecks       bool
 	}{
 		{
 			name:          "Empty endpoints",
@@ -1216,6 +1217,76 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 			consulSvcName: "service-created",
 			k8sObjects: func() []runtime.Object {
 				pod1 := createPod("pod1", "1.2.3.4", true, true)
+				endpoint := &corev1.Endpoints{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "service-created",
+						Namespace: "default",
+					},
+					Subsets: []corev1.EndpointSubset{
+						{
+							Addresses: []corev1.EndpointAddress{
+								{
+									IP:       "1.2.3.4",
+									NodeName: &nodeName,
+									TargetRef: &corev1.ObjectReference{
+										Kind:      "Pod",
+										Name:      "pod1",
+										Namespace: "default",
+									},
+								},
+							},
+						},
+					},
+				}
+				return []runtime.Object{pod1, endpoint}
+			},
+			initialConsulSvcs:       []*api.AgentServiceRegistration{},
+			expectedNumSvcInstances: 1,
+			expectedConsulSvcInstances: []*api.CatalogService{
+				{
+					ServiceID:      "pod1-service-created",
+					ServiceName:    "service-created",
+					ServiceAddress: "1.2.3.4",
+					ServicePort:    0,
+					ServiceMeta:    map[string]string{MetaKeyPodName: "pod1", MetaKeyKubeServiceName: "service-created", MetaKeyKubeNS: "default", MetaKeyManagedBy: managedByValue},
+					ServiceTags:    []string{},
+				},
+			},
+			expectedProxySvcInstances: []*api.CatalogService{
+				{
+					ServiceID:      "pod1-service-created-sidecar-proxy",
+					ServiceName:    "service-created-sidecar-proxy",
+					ServiceAddress: "1.2.3.4",
+					ServicePort:    20000,
+					ServiceProxy: &api.AgentServiceConnectProxyConfig{
+						DestinationServiceName: "service-created",
+						DestinationServiceID:   "pod1-service-created",
+						LocalServiceAddress:    "",
+						LocalServicePort:       0,
+					},
+					ServiceMeta: map[string]string{MetaKeyPodName: "pod1", MetaKeyKubeServiceName: "service-created", MetaKeyKubeNS: "default", MetaKeyManagedBy: managedByValue},
+					ServiceTags: []string{},
+				},
+			},
+			expectedAgentHealthChecks: []*api.AgentCheck{
+				{
+					CheckID:     "default/pod1-service-created/kubernetes-health-check",
+					ServiceName: "service-created",
+					ServiceID:   "pod1-service-created",
+					Name:        "Kubernetes Health Check",
+					Status:      api.HealthPassing,
+					Output:      kubernetesSuccessReasonMsg,
+					Type:        ttl,
+				},
+			},
+		},
+		{
+			name:                 "Basic endpoints with proxy healthchecks",
+			useProxyHealthChecks: true,
+			consulSvcName:        "service-created",
+			k8sObjects: func() []runtime.Object {
+				pod1 := createPod("pod1", "1.2.3.4", true, true)
+				pod1.Annotations[annotationUseProxyHealthCheck] = "true"
 				endpoint := &corev1.Endpoints{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "service-created",
@@ -1522,8 +1593,8 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 				pod1.Annotations[fmt.Sprintf("%sname", annotationMeta)] = "abc"
 				pod1.Annotations[fmt.Sprintf("%sversion", annotationMeta)] = "2"
 				pod1.Annotations[fmt.Sprintf("%spod_name", annotationMeta)] = "$POD_NAME"
-				pod1.Annotations[annotationTags] = "abc,123,$POD_NAME"
-				pod1.Annotations[annotationConnectTags] = "def,456,$POD_NAME"
+				pod1.Annotations[annotationTags] = "abc\\,123,$POD_NAME"
+				pod1.Annotations[annotationConnectTags] = "def\\,456,$POD_NAME"
 				pod1.Annotations[annotationUpstreams] = "upstream1:1234"
 				pod1.Annotations[annotationEnableMetrics] = "true"
 				pod1.Annotations[annotationPrometheusScrapePort] = "12345"
@@ -1567,7 +1638,7 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 						MetaKeyKubeNS:          "default",
 						MetaKeyManagedBy:       managedByValue,
 					},
-					ServiceTags: []string{"abc", "123", "pod1", "def", "456", "pod1"},
+					ServiceTags: []string{"abc,123", "pod1", "def,456", "pod1"},
 				},
 			},
 			expectedProxySvcInstances: []*api.CatalogService{
@@ -1601,7 +1672,7 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 						MetaKeyKubeNS:          "default",
 						MetaKeyManagedBy:       managedByValue,
 					},
-					ServiceTags: []string{"abc", "123", "pod1", "def", "456", "pod1"},
+					ServiceTags: []string{"abc,123", "pod1", "def,456", "pod1"},
 				},
 			},
 			expectedAgentHealthChecks: []*api.AgentCheck{
@@ -1811,6 +1882,17 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 				require.Contains(t, expectedChecks, checks[0].Name)
 				require.Contains(t, expectedChecks, checks[1].Name)
 			}
+			agentChecks, err := consulClient.Agent().Checks()
+			require.NoError(t, err)
+			for _, check := range agentChecks {
+				if check.Name == "Proxy Public Listener" {
+					if tt.useProxyHealthChecks {
+						require.Equal(t, "http", check.Type)
+					} else {
+						require.Equal(t, "tcp", check.Type)
+					}
+				}
+			}
 
 			// Check that the Consul health check was created for the k8s pod.
 			if tt.expectedAgentHealthChecks != nil {
@@ -1830,13 +1912,14 @@ func TestReconcileCreateEndpoint(t *testing.T) {
 
 // Tests updating an Endpoints object.
 //   - Tests updates via the register codepath:
-//     - When an address in an Endpoint is updated, that the corresponding service instance in Consul is updated.
-//     - When an address is added to an Endpoint, an additional service instance in Consul is registered.
-//     - When an address in an Endpoint is updated - via health check change - the corresponding service instance is updated.
+//   - When an address in an Endpoint is updated, that the corresponding service instance in Consul is updated.
+//   - When an address is added to an Endpoint, an additional service instance in Consul is registered.
+//   - When an address in an Endpoint is updated - via health check change - the corresponding service instance is updated.
 //   - Tests updates via the deregister codepath:
-//     - When an address is removed from an Endpoint, the corresponding service instance in Consul is deregistered.
-//     - When an address is removed from an Endpoint *and there are no addresses left in the Endpoint*, the
+//   - When an address is removed from an Endpoint, the corresponding service instance in Consul is deregistered.
+//   - When an address is removed from an Endpoint *and there are no addresses left in the Endpoint*, the
 //     corresponding service instance in Consul is deregistered.
+//
 // For the register and deregister codepath, this also tests that they work when the Consul service name is different
 // from the K8s service name.
 // This test covers EndpointsController.deregisterServiceOnAllAgents when services should be selectively deregistered

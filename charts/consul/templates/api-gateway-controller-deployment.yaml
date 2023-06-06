@@ -13,6 +13,9 @@ metadata:
     heritage: {{ .Release.Service }}
     release: {{ .Release.Name }}
     component: api-gateway-controller
+    {{- if .Values.global.extraLabels }}
+      {{- toYaml .Values.global.extraLabels | nindent 4 }}
+    {{- end }}
 spec:
   replicas: {{ .Values.apiGateway.controller.replicas }}
   selector:
@@ -44,6 +47,9 @@ spec:
         chart: {{ template "consul.chart" . }}
         release: {{ .Release.Name }}
         component: api-gateway-controller
+        {{- if .Values.global.extraLabels }}
+          {{- toYaml .Values.global.extraLabels | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ template "consul.fullname" . }}-api-gateway-controller
       containers:
@@ -89,6 +95,9 @@ spec:
             -mirroring-k8s-prefix={{ .Values.connectInject.consulNamespaces.mirroringK8SPrefix }} \
             {{- end }}
             {{- end }}
+            {{- end }}
+            {{- if and .Values.global.federation.enabled .Values.global.federation.primaryDatacenter }}
+            -primary-datacenter={{ .Values.global.federation.primaryDatacenter }} \
             {{- end }}
             -log-level {{ default .Values.global.logLevel .Values.apiGateway.logLevel }} \
             -log-json={{ .Values.global.logJSON }}
@@ -204,7 +213,12 @@ spec:
         - |
           consul-k8s-control-plane acl-init \
             -component-name=api-gateway-controller \
+            {{- if and .Values.global.federation.enabled .Values.global.federation.primaryDatacenter }}
+            -acl-auth-method={{ template "consul.fullname" . }}-k8s-component-auth-method-{{ .Values.global.datacenter }} \
+            -primary-datacenter={{ .Values.global.federation.primaryDatacenter }} \
+            {{- else }}
             -acl-auth-method={{ template "consul.fullname" . }}-k8s-component-auth-method \
+            {{- end }}
             {{- if .Values.global.adminPartitions.enabled }}
             -partition={{ .Values.global.adminPartitions.name }} \
             {{- end }}
@@ -226,5 +240,9 @@ spec:
       {{- if .Values.apiGateway.controller.nodeSelector }}
       nodeSelector:
         {{ tpl .Values.apiGateway.controller.nodeSelector . | indent 8 | trim }}
+      {{- end }}
+      {{- if .Values.apiGateway.controller.tolerations }}
+      tolerations:
+        {{ tpl .Values.apiGateway.controller.tolerations . | indent 8 | trim }}
       {{- end }}
 {{- end }}

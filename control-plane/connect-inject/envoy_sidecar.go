@@ -1,6 +1,7 @@
 package connectinject
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/google/shlex"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/pointer"
 )
 
 func (w *MeshWebhook) envoySidecar(namespace corev1.Namespace, pod corev1.Pod, mpi multiPortInfo) (corev1.Container, error) {
@@ -48,6 +50,24 @@ func (w *MeshWebhook) envoySidecar(namespace corev1.Namespace, pod corev1.Pod, m
 		Command: cmd,
 	}
 
+	if useProxyHealthCheck(pod) {
+		// Add a port on the sidecar where the sidecar proxy will be queried for its health.
+		container.Ports = append(container.Ports, corev1.ContainerPort{
+			Name:          fmt.Sprintf("%s-%d", "proxy-health", mpi.serviceIndex),
+			ContainerPort: int32(proxyDefaultHealthPort + mpi.serviceIndex),
+		})
+	}
+
+	// Add any extra Envoy VolumeMounts.
+	if _, ok := pod.Annotations[annotationConsulSidecarUserVolumeMount]; ok {
+		var volumeMount []corev1.VolumeMount
+		err := json.Unmarshal([]byte(pod.Annotations[annotationConsulSidecarUserVolumeMount]), &volumeMount)
+		if err != nil {
+			return corev1.Container{}, err
+		}
+		container.VolumeMounts = append(container.VolumeMounts, volumeMount...)
+  }
+  
 	if _, ok := pod.Annotations[annotationSidecarProxyPreStopDelay]; ok {
 		preStopHook := &corev1.Lifecycle{
 			PreStop: &corev1.Handler {
@@ -85,10 +105,10 @@ func (w *MeshWebhook) envoySidecar(namespace corev1.Namespace, pod corev1.Pod, m
 			}
 		}
 		container.SecurityContext = &corev1.SecurityContext{
-			RunAsUser:              pointerToInt64(envoyUserAndGroupID),
-			RunAsGroup:             pointerToInt64(envoyUserAndGroupID),
-			RunAsNonRoot:           pointerToBool(true),
-			ReadOnlyRootFilesystem: pointerToBool(true),
+			RunAsUser:              pointer.Int64(envoyUserAndGroupID),
+			RunAsGroup:             pointer.Int64(envoyUserAndGroupID),
+			RunAsNonRoot:           pointer.Bool(true),
+			ReadOnlyRootFilesystem: pointer.Bool(true),
 		}
 	}
 
@@ -105,7 +125,7 @@ func (w *MeshWebhook) getContainerSidecarCommand(pod corev1.Pod, multiPortSvcNam
 	}
 	if multiPortSvcName != "" {
 		// --base-id is needed so multiple Envoy proxies can run on the same host.
-		cmd = append(cmd, "--base-id", fmt.Sprintf("%d", multiPortSvcIdx))
+		cmd = append(cmd, "--base-id", strconv.Itoa(multiPortSvcIdx))
 	}
 
 	// Check to see if the user has overriden concurrency via an annotation.
@@ -214,4 +234,17 @@ func (w *MeshWebhook) envoySidecarResources(pod corev1.Pod) (corev1.ResourceRequ
 	}
 
 	return resources, nil
+}
+
+// useProxyHealthCheck returns true if the pod has the annotation 'consul.hashicorp.com/use-proxy-health-check'
+// set to truthy values.
+func useProxyHealthCheck(pod corev1.Pod) bool {
+	if v, ok := pod.Annotations[annotationUseProxyHealthCheck]; ok {
+		useProxyHealthCheck, err := strconv.ParseBool(v)
+		if err != nil {
+			return false
+		}
+		return useProxyHealthCheck
+	}
+	return false
 }

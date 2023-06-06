@@ -57,6 +57,25 @@ spec:
           spec:
             description: ServiceDefaultsSpec defines the desired state of ServiceDefaults.
             properties:
+              destination:
+                description: Destination is an address(es)/port combination that represents
+                  an endpoint outside the mesh. This is only valid when the mesh is
+                  configured in "transparent" mode. Destinations live outside of Consul's
+                  catalog, and because of this, they do not require an artificial
+                  node to be created.
+                properties:
+                  addresses:
+                    description: Addresses is a list of IPs and/or hostnames that
+                      can be dialed and routed through a terminating gateway.
+                    items:
+                      type: string
+                    type: array
+                  port:
+                    description: Port is the port that can be dialed on any of the
+                      addresses in this Destination.
+                    format: int32
+                    type: integer
+                type: object
               expose:
                 description: Expose controls the default expose path configuration
                   for Envoy.
@@ -94,6 +113,22 @@ spec:
                   TLS SNI value to be changed to a non-connect value when federating
                   with an external system.
                 type: string
+              localConnectTimeoutMs:
+                description: The number of milliseconds allowed to make connections
+                  to the local application instance before timing out. Defaults to
+                  5000.
+                type: integer
+              localRequestTimeoutMs:
+                description: In milliseconds, the timeout for HTTP requests to the
+                  local application instance. Applies to HTTP-based protocols only.
+                  If not specified, inherits the Envoy default for route timeouts
+                  (15s).
+                type: integer
+              maxInboundConnections:
+                description: MaxInboundConnections is the maximum number of concurrent
+                  inbound connections to each service instance. Defaults to 0 (using
+                  consul's default) if not set.
+                type: integer
               meshGateway:
                 description: MeshGateway controls the default mesh gateway configuration
                   for this service.
@@ -217,6 +252,13 @@ spec:
                           upstream proxy instances will be monitored for removal from
                           the load balancing pool.
                         properties:
+                          enforcing_consecutive_5xx:
+                            description: EnforcingConsecutive5xx is the % chance that
+                              a host will be actually ejected when an outlier status
+                              is detected through consecutive 5xx. This setting can
+                              be used to disable ejection or to ramp it up slowly.
+                            format: int32
+                            type: integer
                           interval:
                             description: Interval between health check analysis sweeps.
                               Each sweep may remove hosts or return hosts to the pool.
@@ -309,6 +351,13 @@ spec:
                             how upstream proxy instances will be monitored for removal
                             from the load balancing pool.
                           properties:
+                            enforcing_consecutive_5xx:
+                              description: EnforcingConsecutive5xx is the % chance
+                                that a host will be actually ejected when an outlier
+                                status is detected through consecutive 5xx. This setting
+                                can be used to disable ejection or to ramp it up slowly.
+                              format: int32
+                              type: integer
                             interval:
                               description: Interval between health check analysis
                                 sweeps. Each sweep may remove hosts or return hosts

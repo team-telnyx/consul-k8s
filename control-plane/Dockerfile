@@ -15,13 +15,15 @@
 # -----------------------------------
 # BIN_NAME is a requirement in the hashicorp docker github action 
 
-FROM alpine:3.15 AS dev
+FROM alpine:3.17 AS dev
 
 # NAME and VERSION are the name of the software in releases.hashicorp.com
 # and the version to download. Example: NAME=consul VERSION=1.2.3.
 ARG BIN_NAME=consul-k8s-control-plane
+ARG CNI_BIN_NAME=consul-cni
 ARG VERSION
-ARG ARCH
+ARG TARGETARCH
+ARG TARGETOS
 
 LABEL name=${BIN_NAME} \
       maintainer="Team Consul Kubernetes <team-consul-kubernetes@hashicorp.com>" \
@@ -35,13 +37,14 @@ LABEL name=${BIN_NAME} \
 ENV BIN_NAME=${BIN_NAME}
 ENV VERSION=${VERSION}
 
-RUN apk add --no-cache ca-certificates curl gnupg libcap openssl su-exec iputils libc6-compat iptables
+RUN apk add --no-cache ca-certificates curl libcap openssl su-exec iputils libc6-compat iptables
 
 # Create a non-root user to run the software.
 RUN addgroup ${BIN_NAME} && \
     adduser -S -G ${BIN_NAME} 100
 
-COPY pkg/bin/linux_${ARCH}/${BIN_NAME} /bin
+COPY pkg/bin/linux_${TARGETARCH}/${BIN_NAME} /bin
+COPY cni/pkg/bin/linux_${TARGETARCH}/${CNI_BIN_NAME} /bin
 
 USER 100
 CMD /bin/${BIN_NAME}
@@ -63,34 +66,36 @@ CMD /bin/${BIN_NAME}
 # We don't rebuild the software because we want the exact checksums and
 # binary signatures to match the software and our builds aren't fully
 # reproducible currently.
-FROM alpine:3.15 AS release-default
+FROM alpine:3.17 AS release-default
 
-# NAME and VERSION are the name of the software in releases.hashicorp.com
-# and the version to download. Example: NAME=consul VERSION=1.2.3.
 ARG BIN_NAME=consul-k8s-control-plane
-ARG VERSION
+ARG CNI_BIN_NAME=consul-cni
+ARG PRODUCT_VERSION
 
 LABEL name=${BIN_NAME} \
       maintainer="Team Consul Kubernetes <team-consul-kubernetes@hashicorp.com>" \
       vendor="HashiCorp" \
-      version=${VERSION} \
-      release=${VERSION} \
+      version=${PRODUCT_VERSION} \
+      release=${PRODUCT_VERSION} \
       summary="consul-k8s-control-plane provides first-class integrations between Consul and Kubernetes." \
       description="consul-k8s-control-plane provides first-class integrations between Consul and Kubernetes."
 
 # Set ARGs as ENV so that they can be used in ENTRYPOINT/CMD
 ENV BIN_NAME=${BIN_NAME}
-ENV VERSION=${VERSION}
+ENV VERSION=${PRODUCT_VERSION}
 
-RUN apk add --no-cache ca-certificates curl gnupg libcap openssl su-exec iputils libc6-compat iptables
+RUN apk add --no-cache ca-certificates libcap openssl su-exec iputils libc6-compat iptables
 
 # TARGETOS and TARGETARCH are set automatically when --platform is provided.
-ARG TARGETOS TARGETARCH
+ARG TARGETOS
+ARG TARGETARCH
 
 # Create a non-root user to run the software.
 RUN addgroup ${BIN_NAME} && \
     adduser -S -G ${BIN_NAME} 100
+
 COPY dist/${TARGETOS}/${TARGETARCH}/${BIN_NAME} /bin/
+COPY dist/cni/${TARGETOS}/${TARGETARCH}/${CNI_BIN_NAME} /bin/
 
 USER 100
 CMD /bin/${BIN_NAME}
@@ -106,32 +111,42 @@ CMD /bin/${BIN_NAME}
 # We don't rebuild the software because we want the exact checksums and
 # binary signatures to match the software and our builds aren't fully
 # reproducible currently.
-FROM registry.access.redhat.com/ubi8/ubi-minimal:8.5 as ubi
+FROM registry.access.redhat.com/ubi9-minimal:9.2 as ubi
 
-# NAME and VERSION are the name of the software in releases.hashicorp.com
-# and the version to download. Example: NAME=consul VERSION=1.2.3.
+ARG PRODUCT_NAME
+ARG PRODUCT_VERSION
+ARG PRODUCT_REVISION
 ARG BIN_NAME
+ARG CNI_BIN_NAME=consul-cni
 ARG VERSION
 
-LABEL name=${BIN_NAME} \
+# PRODUCT_NAME and PRODUCT_VERSION are the name of the software on releases.hashicorp.com
+# and the version to download. Example: PRODUCT_NAME=consul PRODUCT_VERSION=1.2.3.
+ENV BIN_NAME=$BIN_NAME
+ENV PRODUCT_VERSION=$PRODUCT_VERSION
+
+ARG PRODUCT_NAME=$BIN_NAME
+
+LABEL name=$PRODUCT_NAME \
       maintainer="Team Consul Kubernetes <team-consul-kubernetes@hashicorp.com>" \
       vendor="HashiCorp" \
-      version=${VERSION} \
-      release=${VERSION} \
+      version=$PRODUCT_VERSION \
+      release=$PRODUCT_VERSION \
       summary="consul-k8s-control-plane provides first-class integrations between Consul and Kubernetes." \
       description="consul-k8s-control-plane provides first-class integrations between Consul and Kubernetes."
 
 # Set ARGs as ENV so that they can be used in ENTRYPOINT/CMD
 ENV NAME=${BIN_NAME}
-ENV VERSION=${VERSION}
+ENV VERSION=${PRODUCT_VERSION}
 
 # TARGETOS and TARGETARCH are set automatically when --platform is provided.
-ARG TARGETOS TARGETARCH
+ARG TARGETOS
+ARG TARGETARCH
 
 # Copy license for Red Hat certification.
 COPY LICENSE.md /licenses/mozilla.txt
 
-RUN microdnf install -y ca-certificates gnupg libcap openssl shadow-utils iptables
+RUN microdnf install -y ca-certificates libcap openssl shadow-utils iptables
 
 # Create a non-root user to run the software. On OpenShift, this
 # will not matter since the container is run as a random user and group
@@ -141,6 +156,7 @@ RUN groupadd --gid 1000 ${BIN_NAME} && \
     usermod -a -G root ${BIN_NAME}
 
 COPY dist/${TARGETOS}/${TARGETARCH}/${BIN_NAME} /bin/
+COPY dist/cni/${TARGETOS}/${TARGETARCH}/${CNI_BIN_NAME} /bin/
 
 USER 100
 CMD /bin/${BIN_NAME}

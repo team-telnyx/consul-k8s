@@ -1,15 +1,19 @@
 package v1alpha1
 
 import (
+	"fmt"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/hashicorp/consul-k8s/control-plane/api/common"
 	capi "github.com/hashicorp/consul/api"
+	"github.com/miekg/dns"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"net"
+	"strings"
 )
 
 const (
@@ -75,6 +79,21 @@ type ServiceDefaultsSpec struct {
 	// and per-upstream configuration overrides. Note that per-upstream configuration applies
 	// across all federated datacenters to the pairing of source and upstream destination services.
 	UpstreamConfig *Upstreams `json:"upstreamConfig,omitempty"`
+	// Destination is an address(es)/port combination that represents an endpoint
+	// outside the mesh. This is only valid when the mesh is configured in "transparent"
+	// mode. Destinations live outside of Consul's catalog, and because of this, they
+	// do not require an artificial node to be created.
+	Destination *ServiceDefaultsDestination `json:"destination,omitempty"`
+	// MaxInboundConnections is the maximum number of concurrent inbound connections to
+	// each service instance. Defaults to 0 (using consul's default) if not set.
+	MaxInboundConnections int `json:"maxInboundConnections,omitempty"`
+	// The number of milliseconds allowed to make connections to the local application
+	// instance before timing out. Defaults to 5000.
+	LocalConnectTimeoutMs int `json:"localConnectTimeoutMs,omitempty"`
+	// In milliseconds, the timeout for HTTP requests to the local application instance.
+	// Applies to HTTP-based protocols only. If not specified, inherits the Envoy default for
+	// route timeouts (15s).
+	LocalRequestTimeoutMs int `json:"localRequestTimeoutMs,omitempty"`
 }
 
 type Upstreams struct {
@@ -148,6 +167,19 @@ type PassiveHealthCheck struct {
 	// MaxFailures is the count of consecutive failures that results in a host
 	// being removed from the pool.
 	MaxFailures uint32 `json:"maxFailures,omitempty"`
+	// EnforcingConsecutive5xx is the % chance that a host will be actually ejected
+	// when an outlier status is detected through consecutive 5xx.
+	// This setting can be used to disable ejection or to ramp it up slowly.
+	EnforcingConsecutive5xx *uint32 `json:"enforcing_consecutive_5xx,omitempty"`
+}
+
+type ServiceDefaultsDestination struct {
+	// Addresses is a list of IPs and/or hostnames that can be dialed
+	// and routed through a terminating gateway.
+	Addresses []string `json:"addresses,omitempty"`
+	// Port is the port that can be dialed on any of the addresses in this
+	// Destination.
+	Port uint32 `json:"port,omitempty"`
 }
 
 func (in *ServiceDefaults) ConsulKind() string {
@@ -227,15 +259,19 @@ func (in *ServiceDefaults) SyncedConditionStatus() corev1.ConditionStatus {
 // ToConsul converts the entry into it's Consul equivalent struct.
 func (in *ServiceDefaults) ToConsul(datacenter string) capi.ConfigEntry {
 	return &capi.ServiceConfigEntry{
-		Kind:             in.ConsulKind(),
-		Name:             in.ConsulName(),
-		Protocol:         in.Spec.Protocol,
-		MeshGateway:      in.Spec.MeshGateway.toConsul(),
-		Expose:           in.Spec.Expose.toConsul(),
-		ExternalSNI:      in.Spec.ExternalSNI,
-		TransparentProxy: in.Spec.TransparentProxy.toConsul(),
-		UpstreamConfig:   in.Spec.UpstreamConfig.toConsul(),
-		Meta:             meta(datacenter),
+		Kind:                  in.ConsulKind(),
+		Name:                  in.ConsulName(),
+		Protocol:              in.Spec.Protocol,
+		MeshGateway:           in.Spec.MeshGateway.toConsul(),
+		Expose:                in.Spec.Expose.toConsul(),
+		ExternalSNI:           in.Spec.ExternalSNI,
+		TransparentProxy:      in.Spec.TransparentProxy.toConsul(),
+		UpstreamConfig:        in.Spec.UpstreamConfig.toConsul(),
+		Destination:           in.Spec.Destination.toConsul(),
+		Meta:                  meta(datacenter),
+		MaxInboundConnections: in.Spec.MaxInboundConnections,
+		LocalConnectTimeoutMs: in.Spec.LocalConnectTimeoutMs,
+		LocalRequestTimeoutMs: in.Spec.LocalRequestTimeoutMs,
 	}
 }
 
@@ -258,6 +294,22 @@ func (in *ServiceDefaults) Validate(consulMeta common.ConsulMeta) error {
 	if err := in.Spec.Mode.validate(path.Child("mode")); err != nil {
 		allErrs = append(allErrs, err)
 	}
+	if err := in.Spec.Destination.validate(path.Child("destination")); err != nil {
+		allErrs = append(allErrs, err...)
+	}
+
+	if in.Spec.MaxInboundConnections < 0 {
+		allErrs = append(allErrs, field.Invalid(path.Child("maxinboundconnections"), in.Spec.MaxInboundConnections, "MaxInboundConnections must be > 0"))
+	}
+
+	if in.Spec.LocalConnectTimeoutMs < 0 {
+		allErrs = append(allErrs, field.Invalid(path.Child("localConnectTimeoutMs"), in.Spec.LocalConnectTimeoutMs, "LocalConnectTimeoutMs must be > 0"))
+	}
+
+	if in.Spec.LocalRequestTimeoutMs < 0 {
+		allErrs = append(allErrs, field.Invalid(path.Child("localRequestTimeoutMs"), in.Spec.LocalRequestTimeoutMs, "LocalRequestTimeoutMs must be > 0"))
+	}
+
 	allErrs = append(allErrs, in.Spec.UpstreamConfig.validate(path.Child("upstreamConfig"), consulMeta.PartitionsEnabled)...)
 	allErrs = append(allErrs, in.Spec.Expose.validate(path.Child("expose"))...)
 
@@ -355,9 +407,69 @@ func (in *PassiveHealthCheck) toConsul() *capi.PassiveHealthCheck {
 	if in == nil {
 		return nil
 	}
+
 	return &capi.PassiveHealthCheck{
-		Interval:    in.Interval.Duration,
-		MaxFailures: in.MaxFailures,
+		Interval:                in.Interval.Duration,
+		MaxFailures:             in.MaxFailures,
+		EnforcingConsecutive5xx: in.EnforcingConsecutive5xx,
+	}
+}
+
+func (in *ServiceDefaultsDestination) validate(path *field.Path) field.ErrorList {
+	if in == nil {
+		return nil
+	}
+
+	var errs field.ErrorList
+
+	if len(in.Addresses) == 0 {
+		errs = append(errs, field.Required(path.Child("addresses"), "at least one address must be define per destination"))
+	}
+
+	seen := make(map[string]bool, len(in.Addresses))
+	for idx, address := range in.Addresses {
+		if _, ok := seen[address]; ok {
+			errs = append(errs, field.Duplicate(path.Child("addresses").Index(idx), address))
+			continue
+		}
+		seen[address] = true
+
+		if !validEndpointAddress(address) {
+			errs = append(errs, field.Invalid(path.Child("addresses").Index(idx), address, fmt.Sprintf("address %s is not a valid IP or hostname", address)))
+		}
+	}
+
+	if in.Port < 1 || in.Port > 65535 {
+		errs = append(errs, field.Invalid(path.Child("port"), in.Port, "invalid port number"))
+	}
+
+	return errs
+}
+
+func validEndpointAddress(address string) bool {
+	var valid bool
+
+	if address == "" {
+		return false
+	}
+
+	ip := net.ParseIP(address)
+	valid = ip != nil
+
+	hasWildcard := strings.Contains(address, "*")
+	_, ok := dns.IsDomainName(address)
+	valid = valid || (ok && !hasWildcard)
+
+	return valid
+}
+
+func (in *ServiceDefaultsDestination) toConsul() *capi.DestinationConfig {
+	if in == nil {
+		return nil
+	}
+	return &capi.DestinationConfig{
+		Addresses: in.Addresses,
+		Port:      int(in.Port),
 	}
 }
 

@@ -142,7 +142,6 @@ substitution for HOST_IP/POD_IP/HOSTNAME. Useful for dogstats telemetry. The out
 is passed to consul as a -config-file param on command line.
 */}}
 {{- define "consul.extraconfig" -}}
-              mkdir -p /consul/extra-config
               cp /consul/config/extra-from-values.json /consul/extra-config/extra-from-values.json
               [ -n "${HOST_IP}" ] && sed -Ei "s|HOST_IP|${HOST_IP?}|g" /consul/extra-config/extra-from-values.json
               [ -n "${POD_IP}" ] && sed -Ei "s|POD_IP|${POD_IP?}|g" /consul/extra-config/extra-from-values.json
@@ -193,6 +192,20 @@ Add a special case for replicas=1, where it should default to 0 as well.
 {{- 1 -}}
 {{- else -}}
 {{- sub (div (int .Values.server.replicas) 2) 1 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "consul.pdb.connectInject.maxUnavailable" -}}
+{{- if eq (int .Values.connectInject.replicas) 1 -}}
+{{ 0 }}
+{{- else if .Values.connectInject.disruptionBudget.maxUnavailable -}}
+{{ .Values.connectInject.disruptionBudget.maxUnavailable -}}
+{{- else -}}
+{{- if eq (int .Values.connectInject.replicas) 3 -}}
+{{- 1 -}}
+{{- else -}}
+{{- sub (div (int .Values.connectInject.replicas) 2) 1 -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

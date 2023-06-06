@@ -23,6 +23,7 @@
     1. [Writing Unit tests](#writing-unit-tests)
     1. [Writing Acceptance tests](#writing-acceptance-tests)
 1. [Helm Reference Docs](#helm-reference-docs)
+1. [Adding a Changelog Entry](#adding-a-changelog-entry)
 
 
 ## Contributing 101
@@ -35,6 +36,11 @@ You will also need to install the Docker engine:
 - [Docker for Mac](https://docs.docker.com/engine/installation/mac/)
 - [Docker for Windows](https://docs.docker.com/engine/installation/windows/)
 - [Docker for Linux](https://docs.docker.com/engine/installation/linux/ubuntulinux/)
+ 
+Install [gox](https://github.com/mitchellh/gox) (v1.14+). For Mac and Linux:
+  ```bash
+  brew install gox
+  ```
 
 Clone the repository:
 
@@ -103,23 +109,17 @@ helm install consul --create-namespace -n consul -f ./values.dev.yaml ./charts/c
 
 ### Building and running the `consul-k8s` CLI
 
-Change directory into the `cli` folder where the golang code resides.
+Compile the `consul-k8s` CLI binary for your local machine:
 
 ```shell
-cd cli
+make cli-dev
 ```
+This will compile the `consul-k8s` binary into `cli/bin/consul-k8s` as well as your `$GOPATH`.
 
-Build the CLI binary using the following command
-
-```shell
-go build -o bin/consul-k8s
-```
-
-Run the CLI as follows
+Run the CLI as follows:
 
 ```shell
-./bin/consul-k8s version
-consul-k8s 0.36.0-dev
+consul-k8s version
 ```
 
 ### Making changes to consul-k8s
@@ -573,7 +573,7 @@ very quickly. These should be used for fast feedback during development.
 The acceptance tests require a Kubernetes cluster with a configured `kubectl`.
 
 ### Prerequisites
-* [Bats](https://github.com/bats-core/bats-core)
+* [Bats](https://github.com/bats-core/bats-core) (Currently, must use v1.6.0+.)
   ```bash
   brew install bats-core
   ```
@@ -581,7 +581,7 @@ The acceptance tests require a Kubernetes cluster with a configured `kubectl`.
   ```bash
   brew install python-yq
   ```
-* [Helm 3](https://helm.sh) (Currently, must use v3.6.3. Also, Helm 2 is not supported) 
+* [Helm 3](https://helm.sh) (Currently, must use v3.8.0+.) 
   ```bash
   brew install kubernetes-helm
   ```
@@ -614,6 +614,9 @@ To run a specific test by name use the `--filter` flag:
 * [gox](https://github.com/mitchellh/gox) (v1.14+)
   ```bash
   brew install gox
+  ```
+  ```bash
+  make cli-dev
   ```
 To run the acceptance tests:
 
@@ -1013,3 +1016,43 @@ So that the documentation can look like:
 ```markdown
 - `ports` ((#v-ingressgateways-defaults-service-ports)) (`array<map>: [{port: 8080, port: 8443}]`) - Port docs
 ```
+
+## Adding a Changelog Entry
+
+Any change that a Consul-K8s user might need to know about should have a changelog entry.
+
+What doesn't need a changelog entry?
+- Typos/fixes, unless they are in a public-facing API
+- Code changes we are certain no Consul-K8s users will need to know about
+
+To include a [changelog entry](../.changelog) in a PR, commit a text file
+named `.changelog/<PR#>.txt`, where `<PR#>` is the number associated with the open
+PR in GitHub. The text file should describe the changes in the following format:
+
+````
+```release-note:<change type>
+<code area>: <brief description of the improvement you made here>
+```
+````
+
+Valid values for `<change type>` include:
+- `feature`: for the addition of a new feature
+- `improvement`: for an improvement (not a bug fix) to an existing feature
+- `bug`: for a bug fix
+- `security`: for any Common Vulnerabilities and Exposures (CVE) resolutions
+- `breaking-change`: for any change that is not fully backwards-compatible
+- `deprecation`: for functionality which is now marked for removal in a future release
+
+`<code area>` is meant to categorize the functionality affected by the change.
+Some common values are:
+- `cli`: related to the command-line interface and its commands
+- `control-plane`: related to control-plane functionality
+- `helm`: related to the charts module and any files, yaml, go, etc. therein
+
+There may be cases where a `code area` doesn't make sense (i.e. addressing a Go CVE). In these 
+cases it is okay not to provide a `code area`.
+
+For more examples, look in the [`.changelog/`](../.changelog) folder for existing changelog entries.
+
+If a PR deserves multiple changelog entries, just add multiple entries separated by a newline
+in the format described above to the `.changelog/<PR#>.txt` file.

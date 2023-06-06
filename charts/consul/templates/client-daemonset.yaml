@@ -1,6 +1,5 @@
 {{- if .Values.global.imageK8s }}{{ fail "global.imageK8s is not a valid key, use global.imageK8S (note the capital 'S')" }}{{ end -}}
 {{- if (or (and (ne (.Values.client.enabled | toString) "-") .Values.client.enabled) (and (eq (.Values.client.enabled | toString) "-") .Values.global.enabled)) }}
-{{- if (and (and .Values.global.tls.enabled .Values.global.tls.httpsOnly) (and .Values.global.metrics.enabled .Values.global.metrics.enableAgentMetrics))}}{{ fail "global.metrics.enableAgentMetrics cannot be enabled if TLS (HTTPS only) is enabled" }}{{ end -}}
 {{- $serverEnabled := (or (and (ne (.Values.server.enabled | toString) "-") .Values.server.enabled) (and (eq (.Values.server.enabled | toString) "-") .Values.global.enabled)) -}}
 {{- if (and .Values.global.adminPartitions.enabled $serverEnabled (ne .Values.global.adminPartitions.name "default"))}}{{ fail "global.adminPartitions.name has to be \"default\" in the server cluster" }}{{ end -}}
 {{- if (and (not .Values.global.secretsBackend.vault.consulClientRole) .Values.global.secretsBackend.vault.enabled) }}{{ fail "global.secretsBackend.vault.consulClientRole must be provided if global.secretsBackend.vault.enabled=true." }}{{ end -}}
@@ -23,6 +22,9 @@ metadata:
     heritage: {{ .Release.Service }}
     release: {{ .Release.Name }}
     component: client
+    {{- if .Values.global.extraLabels }}
+      {{- toYaml .Values.global.extraLabels | nindent 4 }}
+    {{- end }}
 spec:
   {{- if .Values.client.updateStrategy }}
   updateStrategy:
@@ -45,6 +47,9 @@ spec:
         hasDNS: "true"
         {{- if .Values.client.extraLabels }}
           {{- toYaml .Values.client.extraLabels | nindent 8 }}
+        {{- end }}
+        {{- if .Values.global.extraLabels }}
+          {{- toYaml .Values.global.extraLabels | nindent 8 }}
         {{- end }}
       annotations:
         {{- if .Values.global.secretsBackend.vault.enabled }}
@@ -126,6 +131,8 @@ spec:
         - name: config
           configMap:
             name: {{ template "consul.fullname" . }}-client-config
+        - name: extra-config
+          emptyDir: {}
         - name: consul-data
           emptyDir:
             medium: "Memory"
@@ -284,6 +291,32 @@ spec:
                 {{- end }}
                 -hcl='leave_on_terminate = true' \
                 {{- if .Values.global.tls.enabled }}
+                {{- if .Values.global.peering.enabled }}
+                {{- if .Values.global.secretsBackend.vault.enabled }}
+                -hcl='tls { defaults { ca_file = "/vault/secrets/serverca.crt" }}' \
+                {{- else }}
+                -hcl='tls { defaults { ca_file = "/consul/tls/ca/tls.crt" }}' \
+                {{- end }}
+                {{- if .Values.global.tls.enableAutoEncrypt }}
+                -hcl='auto_encrypt = {tls = true}' \
+                -hcl="auto_encrypt = {ip_san = [\"$HOST_IP\",\"$POD_IP\"]}" \
+                -hcl='tls { grpc { use_auto_cert = true } }' \
+                {{- else }}
+                -hcl='tls { defaults { cert_file = "/consul/tls/client/tls.crt" }}' \
+                -hcl='tls { defaults { key_file = "/consul/tls/client/tls.key" }}' \
+                {{- end }}
+                {{- if .Values.global.tls.verify }}
+                -hcl='tls { defaults { verify_outgoing = true }}' \
+                {{- if not .Values.global.tls.enableAutoEncrypt }}
+                -hcl='tls { internal_rpc { verify_incoming = true }}' \
+                -hcl='tls { internal_rpc { verify_server_hostname = true }}' \
+                {{- end }}
+                {{- end }}
+                -hcl='ports { https = 8501 }' \
+                {{- if .Values.global.tls.httpsOnly }}
+                -hcl='ports { http = -1 }' \
+                {{- end }}
+                {{- else}}
                 {{- if .Values.global.secretsBackend.vault.enabled }}
                 -hcl='ca_file = "/vault/secrets/serverca.crt"' \
                 {{- else }}
@@ -306,6 +339,7 @@ spec:
                 -hcl='ports { https = 8501 }' \
                 {{- if .Values.global.tls.httpsOnly }}
                 -hcl='ports { http = -1 }' \
+                {{- end }}
                 {{- end }}
                 {{- end }}
                 {{- if .Values.client.grpc }}
@@ -359,6 +393,8 @@ spec:
               mountPath: /consul/data
             - name: config
               mountPath: /consul/config
+            - name: extra-config
+              mountPath: /consul/extra-config
             - mountPath: /consul/login
               name: consul-data
               readOnly: true

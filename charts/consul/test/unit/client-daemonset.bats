@@ -239,6 +239,27 @@ load _helpers
 }
 
 #--------------------------------------------------------------------
+# extra-config
+
+@test "client/DaemonSet: has extra-config volume" {
+  cd `chart_dir`
+
+  # check that the extra-config volume is defined
+  local volume_name=$(helm template \
+      -s templates/client-daemonset.yaml \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.volumes[] | select(.name == "extra-config") | .name' | tee /dev/stderr)
+  [ "${volume_name}" = "extra-config" ]
+
+  # check that the consul container mounts the volume at /consul/extra-config
+  local mount_path=$(helm template \
+      -s templates/client-daemonset.yaml \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.containers[] | select(.name == "consul") | .volumeMounts[] | select(.name == "extra-config") | .mountPath' | tee /dev/stderr)
+  [ "${mount_path}" = "/consul/extra-config" ]
+}
+
+#--------------------------------------------------------------------
 # extraVolumes
 
 @test "client/DaemonSet: adds extra volume" {
@@ -444,6 +465,36 @@ load _helpers
   [ "${actualBaz}" = "qux" ]
 }
 
+@test "client/DaemonSet: extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/client-daemonset.yaml  \
+      --set 'client.enabled=true' \
+      --set 'global.extraLabels.foo=bar' \
+      . | tee /dev/stderr)
+  local actualBar=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualBar}" = "bar" ]
+  local actualTemplateBar=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualTemplateBar}" = "bar" ]
+}
+
+@test "client/DaemonSet: multiple extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/client-daemonset.yaml  \
+      --set 'client.enabled=true' \
+      --set 'global.extraLabels.foo=bar' \
+      --set 'global.extraLabels.baz=qux' \
+      . | tee /dev/stderr)
+  local actualFoo=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  local actualBaz=$(echo "${actual}" | yq -r '.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualFoo}" = "bar" ]
+  [ "${actualBaz}" = "qux" ]
+  local actualTemplateFoo=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  local actualTemplateBaz=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualTemplateFoo}" = "bar" ]
+  [ "${actualTemplateBaz}" = "qux" ]
+}
 
 #--------------------------------------------------------------------
 # annotations
@@ -526,20 +577,6 @@ load _helpers
       yq '.spec.template.spec.containers[0].command | join(" ") | contains("telemetry { prometheus_retention_time = \"5m\" }")' | tee /dev/stderr)
 
   [ "${actual}" = "true" ]
-}
-
-@test "client/DaemonSet: when global.metrics.enableAgentMetrics=true, global.tls.enabled=true and global.tls.httpsOnly=true, fail" {
-  cd `chart_dir`
-  run helm template \
-      -s templates/client-daemonset.yaml  \
-      --set 'global.metrics.enabled=true'  \
-      --set 'global.metrics.enableAgentMetrics=true'  \
-      --set 'global.tls.enabled=true'  \
-      --set 'global.tls.httpsOnly=true'  \
-      .
-
-  [ "$status" -eq 1 ]
-  [[ "$output" =~ "global.metrics.enableAgentMetrics cannot be enabled if TLS (HTTPS only) is enabled" ]]
 }
 
 #--------------------------------------------------------------------
@@ -913,6 +950,48 @@ load _helpers
   [ "${actual}" = "true" ]
 }
 
+@test "client/DaemonSet: sets verify_* flags to true by default when global.tls.enabled and global.peering.enabled" {
+  cd `chart_dir`
+  local command=$(helm template \
+      -s templates/client-daemonset.yaml  \
+      --set 'global.tls.enabled=true' \
+      --set 'global.peering.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      . | tee /dev/stderr |
+      yq '.spec.template.spec.containers[0].command | join(" ")' | tee /dev/stderr)
+
+  local actual
+  actual=$(echo $command | jq -r '. | contains("tls { internal_rpc { verify_incoming = true }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+
+  actual=$(echo $command | jq -r '. | contains("tls { defaults { verify_outgoing = true }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+
+  actual=$(echo $command | jq -r '. | contains("tls { internal_rpc { verify_server_hostname = true }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+}
+
+@test "client/DaemonSet: sets updated TLS config when global.tls.enabled and global.peering.enabled" {
+  cd `chart_dir`
+  local command=$(helm template \
+      -s templates/client-daemonset.yaml  \
+      --set 'global.tls.enabled=true' \
+      --set 'global.peering.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      . | tee /dev/stderr |
+      yq '.spec.template.spec.containers[0].command | join(" ")' | tee /dev/stderr)
+
+  local actual
+  actual=$(echo $command | jq -r '. | contains("tls { defaults { ca_file = \"/consul/tls/ca/tls.crt\" }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+
+  actual=$(echo $command | jq -r '. | contains("tls { defaults { cert_file = \"/consul/tls/client/tls.crt\" }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+
+  actual=$(echo $command | jq -r '. | contains("tls { defaults { key_file = \"/consul/tls/client/tls.key\" }}")' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+}
+
 @test "client/DaemonSet: doesn't set the verify_* flags when global.tls.enabled is true and global.tls.verify is false" {
   cd `chart_dir`
   local command=$(helm template \
@@ -1072,29 +1151,22 @@ load _helpers
 
 @test "client/DaemonSet: aclconfig volume is created when global.acls.manageSystemACLs=true" {
   cd `chart_dir`
-  local actual=$(helm template \
+  local volume_name=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.volumes[3].name == "aclconfig"' | tee /dev/stderr)
-  [ "${actual}" = "true" ]
+      yq -r '.spec.template.spec.volumes[] | select(.name == "aclconfig") | .name' | tee /dev/stderr)
+  [ "${volume_name}" = "aclconfig" ]
 }
 
 @test "client/DaemonSet: aclconfig volumeMount is created when global.acls.manageSystemACLs=true" {
   cd `chart_dir`
-  local object=$(helm template \
+  local mount_path=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.containers[0].volumeMounts[3]' | tee /dev/stderr)
-
-  local actual=$(echo $object |
-      yq -r '.name' | tee /dev/stderr)
-  [ "${actual}" = "aclconfig" ]
-
-  local actual=$(echo $object |
-      yq -r '.mountPath' | tee /dev/stderr)
-  [ "${actual}" = "/consul/aclconfig" ]
+      yq -r '.spec.template.spec.containers[] | select(.name == "consul") | .volumeMounts[] | select(.name == "aclconfig") | .mountPath' | tee /dev/stderr)
+  [ "${mount_path}" = "/consul/aclconfig" ]
 }
 
 @test "client/DaemonSet: command includes aclconfig dir when global.acls.manageSystemACLs=true" {
@@ -1206,7 +1278,7 @@ local actual=$(echo $object |
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=false' \
       . | tee /dev/stderr |
-      yq '[.spec.template.spec.containers[0].env[0].name] | any(contains("CONSUL_HTTP_TOKEN_FILE"))' | tee /dev/stderr)
+      yq '[.spec.template.spec.containers[] | select(.name == "consul") | .env[] | .name] | any(contains("CONSUL_HTTP_TOKEN_FILE"))' | tee /dev/stderr)
   [ "${actual}" = "false" ]
 }
 
@@ -1216,7 +1288,7 @@ local actual=$(echo $object |
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
       . | tee /dev/stderr |
-      yq '[.spec.template.spec.containers[0].env[0].name] | any(contains("CONSUL_HTTP_TOKEN_FILE"))' | tee /dev/stderr)
+      yq '[.spec.template.spec.containers[] | select(.name == "consul") | .env[] | .name] | any(contains("CONSUL_HTTP_TOKEN_FILE"))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
 }
 
@@ -1232,37 +1304,34 @@ local actual=$(echo $object |
 
 @test "client/DaemonSet: Adds consul login volume when ACLs are enabled" {
   cd `chart_dir`
-  local object=$(helm template \
+  local volume=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
-      . | yq '.spec.template.spec.volumes[2]' | tee /dev/stderr)
-  local actual=$(echo $object |
-      yq -r '.name' | tee /dev/stderr)
-  [ "${actual}" = "consul-data" ]
+      . | yq '.spec.template.spec.volumes[] | select(.name == "consul-data")' | tee /dev/stderr)
 
-  local actual=$(echo $object |
+  local volume_name=$(echo $volume |
+      yq -r '.name' | tee /dev/stderr)
+  [ "${volume_name}" = "consul-data" ]
+
+  local volume_emptydir_medium=$(echo $volume |
       yq -r '.emptyDir.medium' | tee /dev/stderr)
-  [ "${actual}" = "Memory" ]
+  [ "${volume_emptydir_medium}" = "Memory" ]
 }
 
 @test "client/DaemonSet: Adds consul login volumeMount to client container when ACLs are enabled" {
   cd `chart_dir`
-  local object=$(helm template \
+  local volume_mount=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
-      . | yq '.spec.template.spec.containers[0].volumeMounts[2]' | tee /dev/stderr)
+      . | yq '.spec.template.spec.containers[] | select(.name == "consul") | .volumeMounts[] | select(.name == "consul-data")' | tee /dev/stderr)
 
-  local actual=$(echo $object |
-      yq -r '.name' | tee /dev/stderr)
-  [ "${actual}" = "consul-data" ]
-
-  local actual=$(echo $object |
+  local volume_mount_path=$(echo $volume_mount |
       yq -r '.mountPath' | tee /dev/stderr)
-  [ "${actual}" = "/consul/login" ]
+  [ "${volume_mount_path}" = "/consul/login" ]
 
-  local actual=$(echo $object |
+  local volume_mount_ro=$(echo $volume_mount |
       yq -r '.readOnly' | tee /dev/stderr)
-  [ "${actual}" = "true" ]
+  [ "${volume_mount_ro}" = "true" ]
 }
 
 @test "client/DaemonSet: Adds consul login volumeMount to acl-init init container when ACLs are enabled" {
@@ -1291,7 +1360,7 @@ local actual=$(echo $object |
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
       --set 'global.tls.enabled=true' \
-      . | yq '.spec.template.spec.initContainers[0].volumeMounts[2]' | tee /dev/stderr)
+      . | yq '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .volumeMounts[] | select(.name == "consul-ca-cert")' | tee /dev/stderr)
 
   local actual=$(echo $object |
       yq -r '.name' | tee /dev/stderr)
@@ -1312,8 +1381,8 @@ local actual=$(echo $object |
       -s templates/client-daemonset.yaml  \
       --set 'global.acls.manageSystemACLs=true' \
       --set 'global.tls.enabled=false' \
-      . | yq '.spec.template.spec.initContainers[0].volumeMounts[] | select(.name=="consul-ca-cert")' | tee /dev/stderr)
-  [ "${actual}" == "" ]
+      . | yq '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .volumeMounts[] | select(.name=="consul-ca-cert")' | tee /dev/stderr)
+  [ "${object}" == "" ]
 }
 
 @test "client/DaemonSet: fail when externalServers is enabled but the externalServers.hosts is not provided" {
@@ -1339,7 +1408,7 @@ local actual=$(echo $object |
       --set 'externalServers.hosts[0]=foo'  \
       --set 'externalServers.hosts[1]=bar'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-server-address=\"foo\""))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
@@ -1359,7 +1428,7 @@ local actual=$(echo $object |
       --set 'externalServers.hosts[0]=computer'  \
       --set 'externalServers.tlsServerName=foo'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-tls-server-name=foo"))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
@@ -1374,7 +1443,7 @@ local actual=$(echo $object |
       --set 'server.enabled=false' \
       --set 'externalServers.hosts[0]=computer'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-tls-server-name"))' | tee /dev/stderr)
   [ "${actual}" = "false" ]
@@ -1389,7 +1458,7 @@ local actual=$(echo $object |
       --set 'server.enabled=false' \
       --set 'externalServers.hosts[0]=computer'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-use-https"))' | tee /dev/stderr)
   [ "${actual}" = "false" ]
@@ -1405,7 +1474,7 @@ local actual=$(echo $object |
       --set 'externalServers.hosts[0]=computer'  \
       --set 'global.tls.enabled=true' \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-use-https"))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
@@ -1421,7 +1490,7 @@ local actual=$(echo $object |
       --set 'global.tls.enabled=true' \
       --set 'externalServers.hosts[0]=computer'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-use-https"))' | tee /dev/stderr)
   [ "${actual}" = "false" ]
@@ -1436,7 +1505,7 @@ local actual=$(echo $object |
       --set 'server.enabled=false' \
       --set 'externalServers.hosts[0]=computer'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-server-port"))' | tee /dev/stderr)
   [ "${actual}" = "false" ]
@@ -1451,7 +1520,7 @@ local actual=$(echo $object |
       --set 'server.enabled=false' \
       --set 'externalServers.hosts[0]=computer'  \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.initContainers[0].command' | tee /dev/stderr)
+      yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .command' | tee /dev/stderr)
 
   local actual=$(echo $command | jq -r ' . | any(contains("-server-port"))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
@@ -1467,7 +1536,7 @@ local actual=$(echo $object |
       --set 'client.enabled=true' \
       --set 'client.exposeGossipPorts=false' \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.containers | map(select(.name=="consul")) | .[0].env | map(select(.name=="ADVERTISE_IP")) | .[0] | .valueFrom.fieldRef.fieldPath'  |
+      yq -r '.spec.template.spec.containers[] | select(.name=="consul") | .env[] | select(.name=="ADVERTISE_IP") | .valueFrom.fieldRef.fieldPath' |
       tee /dev/stderr)
   [ "${actual}" = "status.podIP" ]
 }
@@ -1479,33 +1548,33 @@ local actual=$(echo $object |
       --set 'client.enabled=true' \
       --set 'client.exposeGossipPorts=true' \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.containers | map(select(.name=="consul")) | .[0].env | map(select(.name=="ADVERTISE_IP")) | .[0] | .valueFrom.fieldRef.fieldPath'  |
+      yq -r '.spec.template.spec.containers[] | select(.name=="consul") | .env[] | select(.name=="ADVERTISE_IP") | .valueFrom.fieldRef.fieldPath' |
       tee /dev/stderr)
   [ "${actual}" = "status.hostIP" ]
 }
 
 @test "client/DaemonSet: client doesn't expose hostPorts when client.exposeGossipPorts=false" {
   cd `chart_dir`
-  local actual=$(helm template \
+  local has_exposed_host_ports=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'server.enabled=true' \
       --set 'client.enabled=true' \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.containers  | map(select(.name=="consul")) | .[0].ports | map(select(.containerPort==8301)) | .[0].hostPort'  |
+      yq '[.spec.template.spec.containers[] | select(.name=="consul") | .ports[] | select(.containerPort==8301)] | any(has("hostPort"))' |
       tee /dev/stderr)
-  [ "${actual}" = "null" ]
+  [ "${has_exposed_host_ports}" = "false" ]
 }
 
 @test "client/DaemonSet: client exposes hostPorts when client.exposeGossipPorts=true" {
   cd `chart_dir`
-  local actual=$(helm template \
+  local has_exposed_host_ports=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'client.enabled=true' \
       --set 'client.exposeGossipPorts=true' \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.containers  | map(select(.name=="consul")) | .[0].ports | map(select(.containerPort==8301)) | .[0].hostPort'  |
+      yq '[.spec.template.spec.containers[] | select(.name=="consul") | .ports[] | select(.containerPort==8301)] | all(has("hostPort"))' |
       tee /dev/stderr)
-  [ "${actual}" = "8301" ]
+  [ "${has_exposed_host_ports}" = "true" ]
 }
 
 #--------------------------------------------------------------------
@@ -1517,14 +1586,14 @@ local actual=$(echo $object |
   local actual=$(helm template \
       -s templates/client-daemonset.yaml  \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.volumes[0].hostPath == null' | tee /dev/stderr )
+      yq '.spec.template.spec.volumes[] | select(.name == "data") | .hostPath == null' | tee /dev/stderr )
   [ "${actual}" = "true" ]
 
   # Test that emptyDir is set instead.
   local actual=$(helm template \
       -s templates/client-daemonset.yaml  \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.volumes[0].emptyDir == {}' | tee /dev/stderr )
+      yq '.spec.template.spec.volumes[] | select(.name == "data") | .emptyDir == {}' | tee /dev/stderr )
   [ "${actual}" = "true" ]
 }
 
@@ -1534,7 +1603,7 @@ local actual=$(echo $object |
       -s templates/client-daemonset.yaml  \
       --set 'client.dataDirectoryHostPath=/opt/consul' \
       . | tee /dev/stderr |
-      yq '.spec.template.spec.volumes[0].hostPath.path == "/opt/consul"' | tee /dev/stderr)
+      yq '.spec.template.spec.volumes[] | select(.name == "data") | .hostPath.path == "/opt/consul"' | tee /dev/stderr)
   [ "${actual}" = "true" ]
 }
 
@@ -1634,12 +1703,12 @@ rollingUpdate:
 
 @test "client/DaemonSet: securityContext is not set when global.openshift.enabled=true" {
   cd `chart_dir`
-  local actual=$(helm template \
+  local has_security_context=$(helm template \
       -s templates/client-daemonset.yaml  \
       --set 'global.openshift.enabled=true' \
       . | tee /dev/stderr |
-      yq -r '.spec.template.spec.securityContext' | tee /dev/stderr)
-  [ "${actual}" = "null" ]
+      yq -r '.spec.template.spec | has("securityContext")' | tee /dev/stderr)
+  [ "${has_security_context}" = "false" ]
 }
 
 #--------------------------------------------------------------------
@@ -1696,13 +1765,13 @@ rollingUpdate:
       --set 'client.containerSecurityContext.tlsInit.readOnlyRootFileSystem=true' \
       . | tee /dev/stderr)
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.containers | map(select(.name == "consul")) | .[0].securityContext.privileged')
+  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.containers[] | select(.name == "consul") | .securityContext.privileged')
   [ "${actual}" = "false" ]
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers | map(select(.name == "client-acl-init")) | .[0].securityContext.allowPrivilegeEscalation')
+  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | .securityContext.allowPrivilegeEscalation')
   [ "${actual}" = "false" ]
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers | map(select(.name == "client-tls-init")) | .[0].securityContext.readOnlyRootFileSystem')
+  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers[] | select(.name == "client-tls-init") | .securityContext.readOnlyRootFileSystem')
   [ "${actual}" = "true" ]
 }
 
@@ -1722,14 +1791,14 @@ rollingUpdate:
       --set 'client.containerSecurityContext.tlsInit.readOnlyRootFileSystem=true' \
       . | tee /dev/stderr)
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.containers | map(select(.name == "consul")) | .[0].securityContext')
-  [ "${actual}" = "null" ]
+  local has_security_context=$(echo "$manifest" | yq -r '.spec.template.spec.containers[] | select(.name == "consul") | has("securityContext")')
+  [ "${has_security_context}" = "false" ]
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers | map(select(.name == "client-acl-init")) | .[0].securityContext')
-  [ "${actual}" = "null" ]
+  local has_security_context=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers[] | select(.name == "client-acl-init") | has("securityContext")')
+  [ "${has_security_context}" = "false" ]
 
-  local actual=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers | map(select(.name == "client-tls-init")) | .[0].securityContext')
-  [ "${actual}" = "null" ]
+  local has_security_context=$(echo "$manifest" | yq -r '.spec.template.spec.initContainers[] | select(.name == "client-tls-init") | has("securityContext")')
+  [ "${has_security_context}" = "false" ]
 }
 
 #--------------------------------------------------------------------

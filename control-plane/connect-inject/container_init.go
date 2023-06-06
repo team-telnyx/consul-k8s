@@ -9,17 +9,19 @@ import (
 	"text/template"
 	"time"
 
+	"go.uber.org/zap/zapcore"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/pointer"
 )
 
 const (
-	InjectInitCopyContainerName = "copy-consul-bin"
-	InjectInitContainerName     = "consul-connect-inject-init"
-	rootUserAndGroupID          = 0
-	envoyUserAndGroupID         = 5995
-	copyContainerUserAndGroupID = 5996
-	netAdminCapability          = "NET_ADMIN"
-	dnsServiceHostEnvSuffix     = "DNS_SERVICE_HOST"
+	InjectInitCopyContainerName  = "copy-consul-bin"
+	InjectInitContainerName      = "consul-connect-inject-init"
+	rootUserAndGroupID           = 0
+	envoyUserAndGroupID          = 5995
+	initContainersUserAndGroupID = 5996
+	netAdminCapability           = "NET_ADMIN"
+	dnsServiceHostEnvSuffix      = "DNS_SERVICE_HOST"
 )
 
 type initContainerCommandData struct {
@@ -47,13 +49,31 @@ type initContainerCommandData struct {
 	PrometheusScrapePath string
 	// PrometheusBackendPort configures where the listener on Envoy will point to.
 	PrometheusBackendPort string
+	// The file paths to use for configuring TLS on the Prometheus metrics endpoint.
+	PrometheusCAFile   string
+	PrometheusCAPath   string
+	PrometheusCertFile string
+	PrometheusKeyFile  string
 	// EnvoyUID is the Linux user id that will be used when tproxy is enabled.
 	EnvoyUID int
+
+	// EnableProxyHealthChecks configures a readiness endpoint on the envoy sidecar.
+	EnableProxyHealthChecks bool
+	// EnableProxyHealthChecks is the port on which the readiness endpoint is configured
+	// on the envoy sidecar.
+	EnvoyHealthCheckPort int
 
 	// EnableTransparentProxy configures this init container to run in transparent proxy mode,
 	// i.e. run consul connect redirect-traffic command and add the required privileges to the
 	// container to do that.
 	EnableTransparentProxy bool
+
+	// EnableCNI configures this init container to skip the redirect-traffic command as traffic
+	// redirection is handled by the CNI plugin on pod creation.
+	EnableCNI bool
+
+	// EnableEnvoyBootstrapLogging enables debug log output when generating the Envoy bootstrap config.
+	EnableEnvoyBootstrapLogging bool
 
 	// TProxyExcludeInboundPorts is a list of inbound ports to exclude from traffic redirection via
 	// the consul connect redirect-traffic command.
@@ -112,10 +132,10 @@ func (w *MeshWebhook) initCopyContainer() corev1.Container {
 	if !w.EnableOpenShift {
 		container.SecurityContext = &corev1.SecurityContext{
 			// Set RunAsUser because the default user for the consul container is root and we want to run non-root.
-			RunAsUser:              pointerToInt64(copyContainerUserAndGroupID),
-			RunAsGroup:             pointerToInt64(copyContainerUserAndGroupID),
-			RunAsNonRoot:           pointerToBool(true),
-			ReadOnlyRootFilesystem: pointerToBool(true),
+			RunAsUser:              pointer.Int64(initContainersUserAndGroupID),
+			RunAsGroup:             pointer.Int64(initContainersUserAndGroupID),
+			RunAsNonRoot:           pointer.Bool(true),
+			ReadOnlyRootFilesystem: pointer.Bool(true),
 		}
 	}
 	return container
@@ -155,6 +175,9 @@ func (w *MeshWebhook) containerInit(namespace corev1.Namespace, pod corev1.Pod, 
 		NamespaceMirroringEnabled:  w.EnableK8SNSMirroring,
 		ConsulCACert:               w.ConsulCACert,
 		EnableTransparentProxy:     tproxyEnabled,
+		EnableCNI:                  w.EnableCNI,
+		EnableProxyHealthChecks:    useProxyHealthCheck(pod),
+		EnvoyHealthCheckPort:       proxyDefaultHealthPort + mpi.serviceIndex,
 		TProxyExcludeInboundPorts:  splitCommaSeparatedItemsFromAnnotation(annotationTProxyExcludeInboundPorts, pod),
 		TProxyExcludeOutboundPorts: splitCommaSeparatedItemsFromAnnotation(annotationTProxyExcludeOutboundPorts, pod),
 		TProxyExcludeOutboundCIDRs: splitCommaSeparatedItemsFromAnnotation(annotationTProxyExcludeOutboundCIDRs, pod),
@@ -214,6 +237,36 @@ func (w *MeshWebhook) containerInit(namespace corev1.Namespace, pod corev1.Pod, 
 		data.PrometheusScrapePath = prometheusScrapePath
 		data.PrometheusBackendPort = mergedMetricsPort
 	}
+	// Pull the TLS config from the relevant annotations.
+	if raw, ok := pod.Annotations[annotationPrometheusCAFile]; ok && raw != "" {
+		data.PrometheusCAFile = raw
+	}
+	if raw, ok := pod.Annotations[annotationPrometheusCAPath]; ok && raw != "" {
+		data.PrometheusCAPath = raw
+	}
+	if raw, ok := pod.Annotations[annotationPrometheusCertFile]; ok && raw != "" {
+		data.PrometheusCertFile = raw
+	}
+	if raw, ok := pod.Annotations[annotationPrometheusKeyFile]; ok && raw != "" {
+		data.PrometheusKeyFile = raw
+	}
+
+	// Validate required Prometheus TLS config is present if set.
+	if data.PrometheusCertFile != "" || data.PrometheusKeyFile != "" || data.PrometheusCAFile != "" || data.PrometheusCAPath != "" {
+		if data.PrometheusCAFile == "" && data.PrometheusCAPath == "" {
+			return corev1.Container{}, fmt.Errorf("Must set one of %q or %q when providing prometheus TLS config", annotationPrometheusCAFile, annotationPrometheusCAPath)
+		}
+		if data.PrometheusCertFile == "" {
+			return corev1.Container{}, fmt.Errorf("Must set %q when providing prometheus TLS config", annotationPrometheusCertFile)
+		}
+		if data.PrometheusKeyFile == "" {
+			return corev1.Container{}, fmt.Errorf("Must set %q when providing prometheus TLS config", annotationPrometheusKeyFile)
+		}
+	}
+
+	if w.LogLevel == zapcore.DebugLevel.String() {
+		data.EnableEnvoyBootstrapLogging = true
+	}
 
 	// Render the command
 	var buf bytes.Buffer
@@ -265,15 +318,27 @@ func (w *MeshWebhook) containerInit(namespace corev1.Namespace, pod corev1.Pod, 
 	if tproxyEnabled {
 		// Running consul connect redirect-traffic with iptables
 		// requires both being a root user and having NET_ADMIN capability.
-		container.SecurityContext = &corev1.SecurityContext{
-			RunAsUser:  pointerToInt64(rootUserAndGroupID),
-			RunAsGroup: pointerToInt64(rootUserAndGroupID),
-			// RunAsNonRoot overrides any setting in the Pod so that we can still run as root here as required.
-			RunAsNonRoot: pointerToBool(false),
-			Privileged:   pointerToBool(true),
-			Capabilities: &corev1.Capabilities{
-				Add: []corev1.Capability{netAdminCapability},
-			},
+		if !w.EnableCNI {
+			container.SecurityContext = &corev1.SecurityContext{
+				RunAsUser:  pointer.Int64(rootUserAndGroupID),
+				RunAsGroup: pointer.Int64(rootUserAndGroupID),
+				// RunAsNonRoot overrides any setting in the Pod so that we can still run as root here as required.
+				RunAsNonRoot: pointer.Bool(false),
+				Privileged:   pointer.Bool(true),
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{netAdminCapability},
+				},
+			}
+		} else {
+			container.SecurityContext = &corev1.SecurityContext{
+				RunAsUser:    pointer.Int64(initContainersUserAndGroupID),
+				RunAsGroup:   pointer.Int64(initContainersUserAndGroupID),
+				RunAsNonRoot: pointer.Bool(true),
+				Privileged:   pointer.Bool(false),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+			}
 		}
 	}
 
@@ -319,16 +384,6 @@ func consulDNSEnabled(namespace corev1.Namespace, pod corev1.Pod, globalEnabled 
 	}
 	// Else fall back to the global default.
 	return globalEnabled, nil
-}
-
-// pointerToInt64 takes an int64 and returns a pointer to it.
-func pointerToInt64(i int64) *int64 {
-	return &i
-}
-
-// pointerToBool takes a bool and returns a pointer to it.
-func pointerToBool(b bool) *bool {
-	return &b
 }
 
 // splitCommaSeparatedItemsFromAnnotation takes an annotation and a pod
@@ -397,11 +452,27 @@ consul-k8s-control-plane connect-init -pod-name=${POD_NAME} -pod-namespace=${POD
   {{- else }}
   -proxy-id="$(cat /consul/connect-inject/proxyid)" \
   {{- end }}
+  {{- if .EnableProxyHealthChecks }}
+  -envoy-ready-bind-address="${POD_IP}" \
+  -envoy-ready-bind-port={{ .EnvoyHealthCheckPort }} \
+  {{- end }}
   {{- if .PrometheusScrapePath }}
   -prometheus-scrape-path="{{ .PrometheusScrapePath }}" \
   {{- end }}
   {{- if .PrometheusBackendPort }}
   -prometheus-backend-port="{{ .PrometheusBackendPort }}" \
+  {{- end }}
+  {{- if .PrometheusCAFile }}
+  -prometheus-ca-file="{{ .PrometheusCAFile }}" \
+  {{- end }}
+  {{- if .PrometheusCAPath }}
+  -prometheus-ca-path="{{ .PrometheusCAPath }}" \
+  {{- end }}
+  {{- if .PrometheusCertFile }}
+  -prometheus-cert-file="{{ .PrometheusCertFile }}" \
+  {{- end }}
+  {{- if .PrometheusKeyFile }}
+  -prometheus-key-file="{{ .PrometheusKeyFile }}" \
   {{- end }}
   {{- if .AuthMethod }}
   {{- if .MultiPort }}
@@ -416,6 +487,9 @@ consul-k8s-control-plane connect-init -pod-name=${POD_NAME} -pod-namespace=${POD
   {{- if .ConsulNamespace }}
   -namespace="{{ .ConsulNamespace }}" \
   {{- end }}
+  {{- if .EnableEnvoyBootstrapLogging }}
+  -enable-config-gen-logging \
+  {{- end }}
   {{- if .MultiPort }}
   -admin-bind=127.0.0.1:{{ .EnvoyAdminPort }} \
   {{- end }}
@@ -423,6 +497,7 @@ consul-k8s-control-plane connect-init -pod-name=${POD_NAME} -pod-namespace=${POD
 
 
 {{- if .EnableTransparentProxy }}
+{{- if not .EnableCNI }}
 {{- /* The newline below is intentional to allow extra space
        in the rendered template between this and the previous commands. */}}
 
@@ -446,6 +521,9 @@ consul-k8s-control-plane connect-init -pod-name=${POD_NAME} -pod-namespace=${POD
   {{- range .TProxyExcludeOutboundPorts }}
   -exclude-outbound-port="{{ . }}" \
   {{- end }}
+  {{- if .EnableProxyHealthChecks }}
+  -exclude-inbound-port={{ .EnvoyHealthCheckPort }} \
+  {{- end }}
   {{- range .TProxyExcludeOutboundCIDRs }}
   -exclude-outbound-cidr="{{ . }}" \
   {{- end }}
@@ -454,5 +532,6 @@ consul-k8s-control-plane connect-init -pod-name=${POD_NAME} -pod-namespace=${POD
   {{- end }}
   -proxy-id="$(cat /consul/connect-inject/proxyid)" \
   -proxy-uid={{ .EnvoyUID }}
+{{- end }}
 {{- end }}
 `

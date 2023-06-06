@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 )
 
 func TestServiceDefaults_ToConsul(t *testing.T) {
@@ -82,7 +83,8 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 								Interval: metav1.Duration{
 									Duration: 2 * time.Second,
 								},
-								MaxFailures: uint32(20),
+								MaxFailures:             uint32(20),
+								EnforcingConsecutive5xx: pointer.Uint32(100),
 							},
 							MeshGateway: MeshGateway{
 								Mode: "local",
@@ -106,7 +108,8 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 									Interval: metav1.Duration{
 										Duration: 2 * time.Second,
 									},
-									MaxFailures: uint32(10),
+									MaxFailures:             uint32(10),
+									EnforcingConsecutive5xx: pointer.Uint32(60),
 								},
 								MeshGateway: MeshGateway{
 									Mode: "remote",
@@ -129,7 +132,8 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 									Interval: metav1.Duration{
 										Duration: 2 * time.Second,
 									},
-									MaxFailures: uint32(10),
+									MaxFailures:             uint32(10),
+									EnforcingConsecutive5xx: pointer.Uint32(60),
 								},
 								MeshGateway: MeshGateway{
 									Mode: "remote",
@@ -137,6 +141,13 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 							},
 						},
 					},
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{"api.google.com"},
+						Port:      443,
+					},
+					MaxInboundConnections: 20,
+					LocalConnectTimeoutMs: 5000,
+					LocalRequestTimeoutMs: 15000,
 				},
 			},
 			&capi.ServiceConfigEntry{
@@ -183,8 +194,9 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 							MaxConcurrentRequests: intPointer(10),
 						},
 						PassiveHealthCheck: &capi.PassiveHealthCheck{
-							Interval:    2 * time.Second,
-							MaxFailures: uint32(20),
+							Interval:                2 * time.Second,
+							MaxFailures:             uint32(20),
+							EnforcingConsecutive5xx: pointer.Uint32(100),
 						},
 						MeshGateway: capi.MeshGatewayConfig{
 							Mode: "local",
@@ -205,8 +217,9 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 								MaxConcurrentRequests: intPointer(5),
 							},
 							PassiveHealthCheck: &capi.PassiveHealthCheck{
-								Interval:    2 * time.Second,
-								MaxFailures: uint32(10),
+								Interval:                2 * time.Second,
+								MaxFailures:             uint32(10),
+								EnforcingConsecutive5xx: pointer.Uint32(60),
 							},
 							MeshGateway: capi.MeshGatewayConfig{
 								Mode: "remote",
@@ -226,8 +239,9 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 								MaxConcurrentRequests: intPointer(2),
 							},
 							PassiveHealthCheck: &capi.PassiveHealthCheck{
-								Interval:    2 * time.Second,
-								MaxFailures: uint32(10),
+								Interval:                2 * time.Second,
+								MaxFailures:             uint32(10),
+								EnforcingConsecutive5xx: pointer.Uint32(60),
 							},
 							MeshGateway: capi.MeshGatewayConfig{
 								Mode: "remote",
@@ -235,6 +249,13 @@ func TestServiceDefaults_ToConsul(t *testing.T) {
 						},
 					},
 				},
+				Destination: &capi.DestinationConfig{
+					Addresses: []string{"api.google.com"},
+					Port:      443,
+				},
+				MaxInboundConnections: 20,
+				LocalConnectTimeoutMs: 5000,
+				LocalRequestTimeoutMs: 15000,
 				Meta: map[string]string{
 					common.SourceKey:     common.SourceValue,
 					common.DatacenterKey: "datacenter",
@@ -325,7 +346,8 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 								Interval: metav1.Duration{
 									Duration: 2 * time.Second,
 								},
-								MaxFailures: uint32(20),
+								MaxFailures:             uint32(20),
+								EnforcingConsecutive5xx: pointer.Uint32(100),
 							},
 							MeshGateway: MeshGateway{
 								Mode: "local",
@@ -348,7 +370,8 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 									Interval: metav1.Duration{
 										Duration: 2 * time.Second,
 									},
-									MaxFailures: uint32(10),
+									MaxFailures:             uint32(10),
+									EnforcingConsecutive5xx: pointer.Uint32(60),
 								},
 								MeshGateway: MeshGateway{
 									Mode: "remote",
@@ -370,13 +393,18 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 									Interval: metav1.Duration{
 										Duration: 2 * time.Second,
 									},
-									MaxFailures: uint32(10),
+									MaxFailures:             uint32(10),
+									EnforcingConsecutive5xx: pointer.Uint32(60),
 								},
 								MeshGateway: MeshGateway{
 									Mode: "remote",
 								},
 							},
 						},
+					},
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{"api.google.com"},
+						Port:      443,
 					},
 				},
 			},
@@ -422,8 +450,9 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 							MaxConcurrentRequests: intPointer(10),
 						},
 						PassiveHealthCheck: &capi.PassiveHealthCheck{
-							Interval:    2 * time.Second,
-							MaxFailures: uint32(20),
+							Interval:                2 * time.Second,
+							MaxFailures:             uint32(20),
+							EnforcingConsecutive5xx: pointer.Uint32(100),
 						},
 						MeshGateway: capi.MeshGatewayConfig{
 							Mode: "local",
@@ -443,8 +472,9 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 								MaxConcurrentRequests: intPointer(5),
 							},
 							PassiveHealthCheck: &capi.PassiveHealthCheck{
-								Interval:    2 * time.Second,
-								MaxFailures: uint32(10),
+								Interval:                2 * time.Second,
+								MaxFailures:             uint32(10),
+								EnforcingConsecutive5xx: pointer.Uint32(60),
 							},
 							MeshGateway: capi.MeshGatewayConfig{
 								Mode: "remote",
@@ -463,14 +493,19 @@ func TestServiceDefaults_MatchesConsul(t *testing.T) {
 								MaxConcurrentRequests: intPointer(2),
 							},
 							PassiveHealthCheck: &capi.PassiveHealthCheck{
-								Interval:    2 * time.Second,
-								MaxFailures: uint32(10),
+								Interval:                2 * time.Second,
+								MaxFailures:             uint32(10),
+								EnforcingConsecutive5xx: pointer.Uint32(60),
 							},
 							MeshGateway: capi.MeshGatewayConfig{
 								Mode: "remote",
 							},
 						},
 					},
+				},
+				Destination: &capi.DestinationConfig{
+					Addresses: []string{"api.google.com"},
+					Port:      443,
 				},
 			},
 			true,
@@ -584,6 +619,20 @@ func TestServiceDefaults_Validate(t *testing.T) {
 								Protocol:      "",
 							},
 						},
+					},
+				},
+			},
+			expectedErrMsg: "",
+		},
+		"valid - destination": {
+			input: &ServiceDefaults{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-service",
+				},
+				Spec: ServiceDefaultsSpec{
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{"www.google.com"},
+						Port:      443,
 					},
 				},
 			},
@@ -801,6 +850,70 @@ func TestServiceDefaults_Validate(t *testing.T) {
 				},
 			},
 			expectedErrMsg: "servicedefaults.consul.hashicorp.com \"my-service\" is invalid: [spec.protocol: Invalid value: \"invalid\": must be one of \"tcp\", \"http\", \"http2\", \"grpc\", spec.meshGateway.mode: Invalid value: \"invalid-mode\": must be one of \"remote\", \"local\", \"none\", \"\", spec.transparentProxy.outboundListenerPort: Invalid value: 1000: use the annotation `consul.hashicorp.com/transparent-proxy-outbound-listener-port` to configure the Outbound Listener Port, spec.mode: Invalid value: \"transparent\": use the annotation `consul.hashicorp.com/transparent-proxy` to configure the Transparent Proxy Mode, spec.expose.paths[0].path: Invalid value: \"invalid-path\": must begin with a '/', spec.expose.paths[0].protocol: Invalid value: \"invalid-protocol\": must be one of \"http\", \"http2\"]",
+		},
+		"destination.addresses (missing)": {
+			input: &ServiceDefaults{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-service",
+				},
+				Spec: ServiceDefaultsSpec{
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{},
+						Port:      443,
+					},
+				},
+			},
+			expectedErrMsg: `servicedefaults.consul.hashicorp.com "my-service" is invalid: spec.destination.addresses: Required value: at least one address must be define per destination`,
+		},
+		"destination.addresses (duplicate)": {
+			input: &ServiceDefaults{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-service",
+				},
+				Spec: ServiceDefaultsSpec{
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{
+							"google.com",
+							"google.com",
+						},
+						Port: 443,
+					},
+				},
+			},
+			expectedErrMsg: `servicedefaults.consul.hashicorp.com "my-service" is invalid: spec.destination.addresses[1]: Duplicate value: "google.com"`,
+		},
+		"destination.addresses (invalid)": {
+			input: &ServiceDefaults{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-service",
+				},
+				Spec: ServiceDefaultsSpec{
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{
+							"...",
+							"",
+							"*.google.com",
+						},
+						Port: 443,
+					},
+				},
+			},
+			expectedErrMsg: `servicedefaults.consul.hashicorp.com "my-service" is invalid: [spec.destination.addresses[0]: Invalid value: "...": address ... is not a valid IP or hostname, spec.destination.addresses[1]: Invalid value: "": address  is not a valid IP or hostname, spec.destination.addresses[2]: Invalid value: "*.google.com": address *.google.com is not a valid IP or hostname]`,
+		},
+		"destination.port": {
+			input: &ServiceDefaults{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-service",
+				},
+				Spec: ServiceDefaultsSpec{
+					Destination: &ServiceDefaultsDestination{
+						Addresses: []string{
+							"google.com",
+						},
+					},
+				},
+			},
+			expectedErrMsg: `servicedefaults.consul.hashicorp.com "my-service" is invalid: spec.destination.port: Invalid value: 0x0: invalid port number`,
 		},
 	}
 

@@ -6,6 +6,7 @@ import (
 
 	mapset "github.com/deckarep/golang-set"
 	"github.com/hashicorp/consul-k8s/control-plane/helper/controller"
+	consulapi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/go-hclog"
 	"github.com/stretchr/testify/require"
@@ -1005,6 +1006,43 @@ func TestServiceResource_clusterIP(t *testing.T) {
 	})
 }
 
+// Test that the proper registrations with health checks are generated for a ClusterIP type.
+func TestServiceResource_clusterIP_healthCheck(t *testing.T) {
+	t.Parallel()
+	client := fake.NewSimpleClientset()
+	syncer := newTestSyncer()
+	serviceResource := defaultServiceResource(client, syncer)
+	serviceResource.ClusterIPSync = true
+
+	// Start the controller
+	closer := controller.TestControllerRun(&serviceResource)
+	defer closer()
+
+	// Insert the service
+	svc := clusterIPService("foo", metav1.NamespaceDefault)
+	_, err := client.CoreV1().Services(metav1.NamespaceDefault).Create(context.Background(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Insert the endpoints
+	createEndpoints(t, client, "foo", metav1.NamespaceDefault)
+
+	// Verify what we got
+	retry.Run(t, func(r *retry.R) {
+		syncer.Lock()
+		defer syncer.Unlock()
+		actual := syncer.Registrations
+		require.Len(r, actual, 2)
+		require.Equal(r, consulKubernetesCheckName, actual[0].Check.Name)
+		require.Equal(r, consulapi.HealthPassing, actual[0].Check.Status)
+		require.Equal(r, kubernetesSuccessReasonMsg, actual[0].Check.Output)
+		require.Equal(r, consulKubernetesCheckType, actual[0].Check.Type)
+		require.Equal(r, consulKubernetesCheckName, actual[1].Check.Name)
+		require.Equal(r, consulapi.HealthPassing, actual[1].Check.Status)
+		require.Equal(r, kubernetesSuccessReasonMsg, actual[1].Check.Output)
+		require.Equal(r, consulKubernetesCheckType, actual[1].Check.Type)
+	})
+}
+
 // Test clusterIP with prefix.
 func TestServiceResource_clusterIPPrefix(t *testing.T) {
 	t.Parallel()
@@ -1488,50 +1526,6 @@ func TestServiceResource_MirroredPrefixNamespace(t *testing.T) {
 			require.True(r, found, "did not find registration from ns %s", expNS)
 		}
 	})
-}
-
-func TestParseTags(t *testing.T) {
-	cases := []struct {
-		tagsAnno string
-		exp      []string
-	}{
-		{
-			"tag",
-			[]string{"tag"},
-		},
-		{
-			",,removes,,empty,elems,,",
-			[]string{"removes", "empty", "elems"},
-		},
-		{
-			"removes , white  ,space ",
-			[]string{"removes", "white", "space"},
-		},
-		{
-			`\,leading,comma`,
-			[]string{",leading", "comma"},
-		},
-		{
-			`trailing,comma\,`,
-			[]string{"trailing", "comma,"},
-		},
-		{
-			`mid\,dle,com\,ma`,
-			[]string{"mid,dle", "com,ma"},
-		},
-		{
-			`\,\,multi\,\,,\,com\,\,ma`,
-			[]string{",,multi,,", ",com,,ma"},
-		},
-		{
-			`  every\,\,   ,  thing  `,
-			[]string{"every,,", "thing"},
-		},
-	}
-
-	for _, c := range cases {
-		require.Equal(t, c.exp, parseTags(c.tagsAnno))
-	}
 }
 
 // lbService returns a Kubernetes service of type LoadBalancer.

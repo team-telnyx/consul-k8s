@@ -61,6 +61,21 @@ load _helpers
   [[ "$output" =~ "global.acls.createReplicationToken must be true when global.acls.manageSystemACLs is true because the federation secret must include the replication token" ]]
 }
 
+@test "createFederationSecret/Job: disabled by updatepartition != 0" {
+  cd `chart_dir`
+  assert_empty helm template \
+      -s templates/create-federation-secret-job.yaml  \
+      --set 'global.federation.enabled=true' \
+      --set 'global.federation.createFederationSecret=true' \
+      --set 'global.acls.createReplicationToken=true' \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.tls.enabled=true' \
+      --set 'meshGateway.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      --set 'server.updatePartition=1' \
+      .
+}
+
 @test "createFederationSecret/Job: mounts auto-created ca secrets by default" {
   cd `chart_dir`
   local volumes=$(helm template \
@@ -406,4 +421,60 @@ load _helpers
   # check consul-api-timeout
   actual=$(echo $command | jq ' . | contains("-consul-api-timeout=5s")')
   [ "${actual}" = "true" ]
+}
+
+#--------------------------------------------------------------------
+# extraLabels
+
+@test "createFederationSecret/Job: no extra labels defined by default" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/create-federation-secret-job.yaml \
+      --set 'global.federation.enabled=true' \
+      --set 'meshGateway.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      --set 'global.tls.enabled=true' \
+      --set 'global.federation.createFederationSecret=true' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.metadata.labels | del(."app") | del(."chart") | del(."release") | del(."component")' | tee /dev/stderr)
+  [ "${actual}" = "{}" ]
+}
+
+@test "createFederationSecret/Job: extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/create-federation-secret-job.yaml \
+      --set 'global.federation.enabled=true' \
+      --set 'meshGateway.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      --set 'global.tls.enabled=true' \
+      --set 'global.federation.createFederationSecret=true' \
+      --set 'global.extraLabels.foo=bar' \
+      . | tee /dev/stderr)
+  local actualBar=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualBar}" = "bar" ]
+  local actualTemplateBar=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualTemplateBar}" = "bar" ]
+}
+
+@test "createFederationSecret/Job: multiple global extra labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/create-federation-secret-job.yaml \
+      --set 'global.federation.enabled=true' \
+      --set 'meshGateway.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      --set 'global.tls.enabled=true' \
+      --set 'global.federation.createFederationSecret=true' \
+      --set 'global.extraLabels.foo=bar' \
+      --set 'global.extraLabels.baz=qux' \
+      . | tee /dev/stderr)
+  local actualFoo=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  local actualBaz=$(echo "${actual}" | yq -r '.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualFoo}" = "bar" ]
+  [ "${actualBaz}" = "qux" ]
+  local actualTemplateFoo=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  local actualTemplateBaz=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualTemplateFoo}" = "bar" ]
+  [ "${actualTemplateBaz}" = "qux" ]
 }

@@ -27,6 +27,9 @@ metadata:
     heritage: {{ .Release.Service }}
     release: {{ .Release.Name }}
     component: server-acl-init
+    {{- if .Values.global.extraLabels }}
+      {{- toYaml .Values.global.extraLabels | nindent 4 }}
+    {{- end }}
 spec:
   template:
     metadata:
@@ -36,6 +39,9 @@ spec:
         chart: {{ template "consul.chart" . }}
         release: {{ .Release.Name }}
         component: server-acl-init
+        {{- if .Values.global.extraLabels }}
+          {{- toYaml .Values.global.extraLabels | nindent 8 }}
+        {{- end }}
       annotations:
         "consul.hashicorp.com/connect-inject": "false"
         {{- if .Values.global.secretsBackend.vault.enabled }}
@@ -185,6 +191,9 @@ spec:
                 -enable-partitions=true \
                 -partition={{ .Values.global.adminPartitions.name }} \
                 {{- end }}
+                {{- if .Values.global.peering.enabled }}
+                -enable-peering=true \
+                {{- end }}
                 {{- if (or (and (ne (.Values.dns.enabled | toString) "-") .Values.dns.enabled) (and (eq (.Values.dns.enabled | toString) "-") .Values.global.enabled)) }}
                 -allow-dns=true \
                 {{- end }}
@@ -325,6 +334,14 @@ spec:
             limits:
               memory: "50Mi"
               cpu: "50m"
+      {{- if .Values.global.acls.tolerations }}
+      tolerations:
+        {{ tpl .Values.global.acls.tolerations . | indent 8 | trim }}
+      {{- end }}
+      {{- if .Values.global.acls.nodeSelector }}
+      nodeSelector:
+        {{ tpl .Values.global.acls.nodeSelector . | indent 8 | trim }}
+      {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

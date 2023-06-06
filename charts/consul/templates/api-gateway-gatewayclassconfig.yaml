@@ -15,6 +15,9 @@ spec:
       {{- if .Values.global.acls.manageSystemACLs }}
       managed: true
       method: {{ template "consul.fullname" . }}-k8s-auth-method
+      {{- if .Values.global.enablePodSecurityPolicies }}
+      podSecurityPolicy: {{ template "consul.fullname" . }}-api-gateway
+      {{- end }}
       {{- end }}
     {{- if .Values.global.tls.enabled }}
     scheme: https
@@ -35,9 +38,13 @@ spec:
   image:
     consulAPIGateway: {{ .Values.apiGateway.image }}
     envoy: {{ .Values.global.imageEnvoy }}
-  {{- if .Values.apiGateway.nodeSelector }}
+  {{- if .Values.apiGateway.managedGatewayClass.nodeSelector }}
   nodeSelector:
     {{ tpl .Values.apiGateway.managedGatewayClass.nodeSelector . | indent 4 | trim }}
+  {{- end }}
+  {{- if .Values.apiGateway.managedGatewayClass.tolerations }}
+  tolerations:
+    {{ tpl .Values.apiGateway.managedGatewayClass.tolerations . | indent 4 | trim }}
   {{- end }}
   {{- if .Values.apiGateway.managedGatewayClass.copyAnnotations.service }}
   copyAnnotations:

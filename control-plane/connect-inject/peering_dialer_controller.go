@@ -3,6 +3,8 @@ package connectinject
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -13,9 +15,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // PeeringDialerController reconciles a PeeringDialer object.
@@ -72,29 +80,18 @@ func (r *PeeringDialerController) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	// TODO(peering): remove this once CRD validation exists.
-	secretSet := false
-	if dialer.Secret() != nil {
-		secretSet = true
-	}
-	if !secretSet {
-		err = errors.New("PeeringDialer spec.peer.secret was not set")
-		r.updateStatusError(ctx, dialer, err)
-		return ctrl.Result{}, err
-	}
-
 	// specSecret will be nil if the secret specified by the spec doesn't exist.
 	var specSecret *corev1.Secret
 	specSecret, err = r.getSecret(ctx, dialer.Secret().Name, dialer.Namespace)
 	if err != nil {
-		r.updateStatusError(ctx, dialer, err)
+		r.updateStatusError(ctx, dialer, KubernetesError, err)
 		return ctrl.Result{}, err
 	}
 
 	// If specSecret doesn't exist, error because we can only initiate peering if we have a token to initiate with.
 	if specSecret == nil {
 		err = errors.New("PeeringDialer spec.peer.secret does not exist")
-		r.updateStatusError(ctx, dialer, err)
+		r.updateStatusError(ctx, dialer, InternalError, err)
 		return ctrl.Result{}, err
 	}
 
@@ -109,7 +106,7 @@ func (r *PeeringDialerController) Reconcile(ctx context.Context, req ctrl.Reques
 	if secretRefSet {
 		statusSecret, err = r.getSecret(ctx, dialer.SecretRef().Name, dialer.Namespace)
 		if err != nil {
-			r.updateStatusError(ctx, dialer, err)
+			r.updateStatusError(ctx, dialer, KubernetesError, err)
 			return ctrl.Result{}, err
 		}
 	}
@@ -122,10 +119,10 @@ func (r *PeeringDialerController) Reconcile(ctx context.Context, req ctrl.Reques
 		r.Log.Info("the secret in status.secretRef doesn't exist or wasn't set, establishing peering with the existing spec.peer.secret", "secret-name", dialer.Secret().Name, "secret-namespace", dialer.Namespace)
 		peeringToken := specSecret.Data[dialer.Secret().Key]
 		if err := r.establishPeering(ctx, dialer.Name, string(peeringToken)); err != nil {
-			r.updateStatusError(ctx, dialer, err)
+			r.updateStatusError(ctx, dialer, ConsulAgentError, err)
 			return ctrl.Result{}, err
 		} else {
-			err := r.updateStatus(ctx, dialer, specSecret.ResourceVersion)
+			err := r.updateStatus(ctx, req.NamespacedName, specSecret.ResourceVersion)
 			return ctrl.Result{}, err
 		}
 	} else {
@@ -145,10 +142,10 @@ func (r *PeeringDialerController) Reconcile(ctx context.Context, req ctrl.Reques
 			r.Log.Info("status.secret exists, but the peering doesn't exist in Consul; establishing peering with the existing spec.peer.secret", "secret-name", dialer.Secret().Name, "secret-namespace", dialer.Namespace)
 			peeringToken := specSecret.Data[dialer.Secret().Key]
 			if err := r.establishPeering(ctx, dialer.Name, string(peeringToken)); err != nil {
-				r.updateStatusError(ctx, dialer, err)
+				r.updateStatusError(ctx, dialer, ConsulAgentError, err)
 				return ctrl.Result{}, err
 			} else {
-				err := r.updateStatus(ctx, dialer, specSecret.ResourceVersion)
+				err := r.updateStatus(ctx, req.NamespacedName, specSecret.ResourceVersion)
 				return ctrl.Result{}, err
 			}
 		}
@@ -156,15 +153,30 @@ func (r *PeeringDialerController) Reconcile(ctx context.Context, req ctrl.Reques
 		// Or, if the peering in Consul does exist, compare it to the spec's secret. If there's any
 		// differences, initiate peering.
 		if r.specStatusSecretsDifferent(dialer, specSecret) {
-			r.Log.Info("the secret in status.secretRef exists and is different from spec.peer.secret; establishing peering with the existing spec.peer.secret", "secret-name", dialer.Secret().Name, "secret-namespace", dialer.Namespace)
+			r.Log.Info("the spec.peer.secret is different from the status secret, re-establishing peering", "secret-name", dialer.Secret().Name, "secret-namespace", dialer.Namespace)
 			peeringToken := specSecret.Data[dialer.Secret().Key]
 			if err := r.establishPeering(ctx, dialer.Name, string(peeringToken)); err != nil {
-				r.updateStatusError(ctx, dialer, err)
+				r.updateStatusError(ctx, dialer, ConsulAgentError, err)
 				return ctrl.Result{}, err
 			} else {
-				err := r.updateStatus(ctx, dialer, specSecret.ResourceVersion)
+				err := r.updateStatus(ctx, req.NamespacedName, specSecret.ResourceVersion)
 				return ctrl.Result{}, err
 			}
+		}
+
+		if updated, err := r.versionAnnotationUpdated(dialer); err == nil && updated {
+			r.Log.Info("the version annotation was incremented; re-establishing peering with spec.peer.secret", "secret-name", dialer.Secret().Name, "secret-namespace", dialer.Namespace)
+			peeringToken := specSecret.Data[dialer.Secret().Key]
+			if err := r.establishPeering(ctx, dialer.Name, string(peeringToken)); err != nil {
+				r.updateStatusError(ctx, dialer, ConsulAgentError, err)
+				return ctrl.Result{}, err
+			} else {
+				err := r.updateStatus(ctx, req.NamespacedName, specSecret.ResourceVersion)
+				return ctrl.Result{}, err
+			}
+		} else if err != nil {
+			r.updateStatusError(ctx, dialer, InternalError, err)
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -184,15 +196,26 @@ func (r *PeeringDialerController) specStatusSecretsDifferent(dialer *consulv1alp
 	return dialer.SecretRef().ResourceVersion != existingSpecSecret.ResourceVersion
 }
 
-func (r *PeeringDialerController) updateStatus(ctx context.Context, dialer *consulv1alpha1.PeeringDialer, resourceVersion string) error {
+func (r *PeeringDialerController) updateStatus(ctx context.Context, dialerObjKey types.NamespacedName, resourceVersion string) error {
+	dialer := &consulv1alpha1.PeeringDialer{}
+	if err := r.Client.Get(ctx, dialerObjKey, dialer); err != nil {
+		return fmt.Errorf("error fetching dialer resource before status update: %w", err)
+	}
 	dialer.Status.SecretRef = &consulv1alpha1.SecretRefStatus{
 		Secret:          *dialer.Spec.Peer.Secret,
 		ResourceVersion: resourceVersion,
 	}
-	dialer.Status.LastReconcileTime = &metav1.Time{Time: time.Now()}
-	dialer.Status.ReconcileError = &consulv1alpha1.ReconcileErrorStatus{
-		Error:   pointerToBool(false),
-		Message: pointerToString(""),
+	dialer.Status.LastSyncedTime = &metav1.Time{Time: time.Now()}
+	dialer.SetSyncedCondition(corev1.ConditionTrue, "", "")
+	if peeringVersionString, ok := dialer.Annotations[annotationPeeringVersion]; ok {
+		peeringVersion, err := strconv.ParseUint(peeringVersionString, 10, 64)
+		if err != nil {
+			r.Log.Error(err, "failed to update PeeringDialer status", "name", dialer.Name, "namespace", dialer.Namespace)
+			return err
+		}
+		if dialer.Status.LatestPeeringVersion == nil || *dialer.Status.LatestPeeringVersion < peeringVersion {
+			dialer.Status.LatestPeeringVersion = pointer.Uint64(peeringVersion)
+		}
 	}
 	err := r.Status().Update(ctx, dialer)
 	if err != nil {
@@ -201,12 +224,8 @@ func (r *PeeringDialerController) updateStatus(ctx context.Context, dialer *cons
 	return err
 }
 
-func (r *PeeringDialerController) updateStatusError(ctx context.Context, dialer *consulv1alpha1.PeeringDialer, reconcileErr error) {
-	dialer.Status.ReconcileError = &consulv1alpha1.ReconcileErrorStatus{
-		Error:   pointerToBool(true),
-		Message: pointerToString(reconcileErr.Error()),
-	}
-	dialer.Status.LastReconcileTime = &metav1.Time{Time: time.Now()}
+func (r *PeeringDialerController) updateStatusError(ctx context.Context, dialer *consulv1alpha1.PeeringDialer, reason string, reconcileErr error) {
+	dialer.SetSyncedCondition(corev1.ConditionFalse, reason, reconcileErr.Error())
 	err := r.Status().Update(ctx, dialer)
 	if err != nil {
 		r.Log.Error(err, "failed to update PeeringDialer status", "name", dialer.Name, "namespace", dialer.Namespace)
@@ -231,7 +250,11 @@ func (r *PeeringDialerController) getSecret(ctx context.Context, name string, na
 func (r *PeeringDialerController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&consulv1alpha1.PeeringDialer{}).
-		Complete(r)
+		Watches(
+			&source.Kind{Type: &corev1.Secret{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForPeeringTokens),
+			builder.WithPredicates(predicate.NewPredicateFuncs(r.filterPeeringDialers)),
+		).Complete(r)
 }
 
 // establishPeering is a helper function that calls the Consul api to generate a token for the peer.
@@ -256,4 +279,54 @@ func (r *PeeringDialerController) deletePeering(ctx context.Context, peerName st
 		return err
 	}
 	return nil
+}
+
+func (r *PeeringDialerController) versionAnnotationUpdated(dialer *consulv1alpha1.PeeringDialer) (bool, error) {
+	if peeringVersionString, ok := dialer.Annotations[annotationPeeringVersion]; ok {
+		peeringVersion, err := strconv.ParseUint(peeringVersionString, 10, 64)
+		if err != nil {
+			return false, err
+		}
+		if dialer.Status.LatestPeeringVersion == nil || *dialer.Status.LatestPeeringVersion < peeringVersion {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// requestsForPeeringTokens creates a slice of requests for the peering dialer controller.
+// It enqueues a request for each dialer that needs to be reconciled. It iterates through
+// the list of dialers and creates a request for the dialer that has the same secret as it's
+// secret and that of the updated secret that is being watched.
+// We compare it to the secret in the spec as the resource is dependent on the secret.
+func (r *PeeringDialerController) requestsForPeeringTokens(object client.Object) []reconcile.Request {
+	r.Log.Info("received update for Peering Token Secret", "name", object.GetName(), "namespace", object.GetNamespace())
+
+	// Get the list of all dialers.
+	var dialerList consulv1alpha1.PeeringDialerList
+	if err := r.Client.List(r.Context, &dialerList); err != nil {
+		r.Log.Error(err, "failed to list PeeringDialers")
+		return []ctrl.Request{}
+	}
+	for _, dialer := range dialerList.Items {
+		if dialer.Secret().Backend == "kubernetes" {
+			if dialer.Secret().Name == object.GetName() && dialer.Namespace == object.GetNamespace() {
+				return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: dialer.Namespace, Name: dialer.Name}}}
+			}
+		}
+	}
+	return []ctrl.Request{}
+}
+
+// filterPeeringDialers receives meta and object information for Kubernetes resources that are being watched,
+// which in this case are Secrets. It only returns true if the Secret is a Peering Token Secret. It reads the labels
+// from the meta of the resource and uses the values of the "consul.hashicorp.com/peering-token" label to validate that
+// the Secret is a Peering Token Secret.
+func (r *PeeringDialerController) filterPeeringDialers(object client.Object) bool {
+	secretLabels := object.GetLabels()
+	isPeeringToken, ok := secretLabels[labelPeeringToken]
+	if !ok {
+		return false
+	}
+	return isPeeringToken == "true"
 }

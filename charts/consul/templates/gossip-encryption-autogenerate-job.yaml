@@ -14,6 +14,9 @@ metadata:
     heritage: {{ .Release.Service }}
     release: {{ .Release.Name }}
     component: gossip-encryption-autogenerate
+    {{- if .Values.global.extraLabels }}
+      {{- toYaml .Values.global.extraLabels | nindent 4 }}
+    {{- end }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "1"
@@ -27,16 +30,21 @@ spec:
         chart: {{ template "consul.chart" . }}
         release: {{ .Release.Name }}
         component: gossip-encryption-autogenerate
+        {{- if .Values.global.extraLabels }}
+          {{- toYaml .Values.global.extraLabels | nindent 8 }}
+        {{- end }}
       annotations:
         "consul.hashicorp.com/connect-inject": "false"
     spec:
       restartPolicy: Never
       serviceAccountName: {{ template "consul.fullname" . }}-gossip-encryption-autogenerate
+      {{- if not .Values.global.openshift.enabled }}
       securityContext:
         runAsNonRoot: true
         runAsGroup: 1000 
         runAsUser: 100 
         fsGroup: 1000
+      {{- end }}
       containers:
         - name: gossip-encryption-autogen
           image: "{{ .Values.global.imageK8S }}"

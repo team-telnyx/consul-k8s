@@ -5,7 +5,6 @@
 {{- if and .Values.server.serverCert.secretName (not .Values.global.tls.caCert.secretName) }}{{ fail "If server.serverCert.secretName is provided, global.tls.caCert must also be provided" }}{{ end }}
 {{- if .Values.server.disableFsGroupSecurityContext }}{{ fail "server.disableFsGroupSecurityContext has been removed. Please use global.openshift.enabled instead." }}{{ end }}
 {{- if .Values.server.bootstrapExpect }}{{ if lt (int .Values.server.bootstrapExpect) (int .Values.server.replicas) }}{{ fail "server.bootstrapExpect cannot be less than server.replicas" }}{{ end }}{{ end }}
-{{- if (and (and .Values.global.tls.enabled .Values.global.tls.httpsOnly) (and .Values.global.metrics.enabled .Values.global.metrics.enableAgentMetrics))}}{{ fail "global.metrics.enableAgentMetrics cannot be enabled if TLS (HTTPS only) is enabled" }}{{ end -}}
 {{- if (and .Values.global.gossipEncryption.secretName (not .Values.global.gossipEncryption.secretKey)) }}{{fail "gossipEncryption.secretKey and secretName must both be specified." }}{{ end -}}
 {{- if (and (not .Values.global.gossipEncryption.secretName) .Values.global.gossipEncryption.secretKey) }}{{fail "gossipEncryption.secretKey and secretName must both be specified." }}{{ end -}}
 {{- if (and .Values.global.secretsBackend.vault.enabled (not .Values.global.secretsBackend.vault.consulServerRole)) }}{{ fail "global.secretsBackend.vault.consulServerRole must be provided if global.secretsBackend.vault.enabled=true." }}{{ end -}}
@@ -29,6 +28,9 @@ metadata:
     heritage: {{ .Release.Service }}
     release: {{ .Release.Name }}
     component: server
+    {{- if .Values.global.extraLabels }}
+      {{- toYaml .Values.global.extraLabels | nindent 4 }}
+    {{- end }}
 spec:
   serviceName: {{ template "consul.fullname" . }}-server
   podManagementPolicy: Parallel
@@ -56,6 +58,9 @@ spec:
         hasDNS: "true"
         {{- if .Values.server.extraLabels }}
           {{- toYaml .Values.server.extraLabels | nindent 8 }}
+        {{- end }}
+        {{- if .Values.global.extraLabels }}
+          {{- toYaml .Values.global.extraLabels | nindent 8 }}
         {{- end }}
       annotations:
         {{- if .Values.global.secretsBackend.vault.enabled }}
@@ -130,6 +135,8 @@ spec:
         - name: config
           configMap:
             name: {{ template "consul.fullname" . }}-server-config
+        - name: extra-config
+          emptyDir: {}
         {{- if (and .Values.global.tls.enabled (not .Values.global.secretsBackend.vault.enabled)) }}
         - name: consul-ca-cert
           secret:
@@ -303,6 +310,8 @@ spec:
               mountPath: /consul/data
             - name: config
               mountPath: /consul/config
+            - name: extra-config
+              mountPath: /consul/extra-config
             {{- if (and .Values.global.tls.enabled (not .Values.global.secretsBackend.vault.enabled)) }}
             - name: consul-ca-cert
               mountPath: /consul/tls/ca/
@@ -335,6 +344,11 @@ spec:
             - name: https
               containerPort: 8501
             {{- end }}
+            - containerPort: 8503
+              {{- if .Values.server.exposeGossipAndRPCPorts }}
+              hostPort: 8503
+              {{- end }}
+              name: grpc
             - name: serflan-tcp
               containerPort: {{ .Values.server.ports.serflan.port }}
               {{- if .Values.server.exposeGossipAndRPCPorts }}

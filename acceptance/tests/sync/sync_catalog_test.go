@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/consul-k8s/acceptance/framework/helpers"
 	"github.com/hashicorp/consul-k8s/acceptance/framework/k8s"
 	"github.com/hashicorp/consul-k8s/acceptance/framework/logger"
+	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +19,10 @@ import (
 // The test will create a test service and a pod and will
 // wait for the service to be synced *to* consul.
 func TestSyncCatalog(t *testing.T) {
+	cfg := suite.Config()
+	if cfg.EnableCNI {
+		t.Skipf("skipping because -enable-cni is set and sync catalog is already tested with regular tproxy")
+	}
 	cases := []struct {
 		name       string
 		helmValues map[string]string
@@ -80,8 +85,13 @@ func TestSyncCatalog(t *testing.T) {
 
 			service, _, err := consulClient.Catalog().Service(syncedServiceName, "", nil)
 			require.NoError(t, err)
-			require.Equal(t, 1, len(service))
+			require.Len(t, service, 1)
 			require.Equal(t, []string{"k8s"}, service[0].ServiceTags)
+			filter := fmt.Sprintf("ServiceID == %q", service[0].ServiceID)
+			healthChecks, _, err := consulClient.Health().Checks(syncedServiceName, &api.QueryOptions{Filter: filter})
+			require.NoError(t, err)
+			require.Len(t, healthChecks, 1)
+			require.Equal(t, api.HealthPassing, healthChecks[0].Status)
 		})
 	}
 }

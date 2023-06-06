@@ -1387,6 +1387,37 @@ load _helpers
 }
 
 #--------------------------------------------------------------------
+# cluster peering
+
+@test "serverACLInit/Job: cluster peering disabled by default" {
+  cd `chart_dir`
+  local object=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      . | tee /dev/stderr |
+      yq '.spec.template.spec.containers[0].command' | tee /dev/stderr)
+
+  local actual=$(echo $object |
+    yq 'any(contains("enable-peering"))' | tee /dev/stderr)
+  [ "${actual}" = "false" ]
+}
+
+@test "serverACLInit/Job: cluster peering enabled when peering is enabled" {
+  cd `chart_dir`
+  local object=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.peering.enabled=true' \
+      --set 'connectInject.enabled=true' \
+      . | tee /dev/stderr |
+      yq '.spec.template.spec.containers[0].command' | tee /dev/stderr)
+
+  local actual=$(echo $object |
+    yq 'any(contains("enable-peering"))' | tee /dev/stderr)
+  [ "${actual}" = "true" ]
+}
+
+#--------------------------------------------------------------------
 # admin partitions
 
 @test "serverACLInit/Job: admin partitions disabled by default" {
@@ -1518,6 +1549,51 @@ load _helpers
   local actual=$(echo "$object" |
     yq '.spec.template.spec.containers[0].volumeMounts | map(select(.name == "acl-replication-token")) | length == 1' | tee /dev/stderr)
   [ "${actual}" = "true" ]
+}
+
+#--------------------------------------------------------------------
+# global.acls.tolerations and global.acls.nodeSelector
+
+@test "serverACLInit/Job: tolerations not set by default" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.tolerations' | tee /dev/stderr)
+  [ "${actual}" = "null" ]
+}
+
+@test "serverACLInit/Job: tolerations can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.acls.tolerations=- key: value' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.tolerations[0].key' | tee /dev/stderr)
+  [ "${actual}" = "value" ]
+}
+
+@test "serverACLInit/Job: nodeSelector not set by default" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.nodeSelector' | tee /dev/stderr)
+  [ "${actual}" = "null" ]
+}
+
+@test "serverACLInit/Job: nodeSelector can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml  \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.acls.nodeSelector=- key: value' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.spec.nodeSelector[0].key' | tee /dev/stderr)
+  [ "${actual}" = "value" ]
 }
 
 #--------------------------------------------------------------------
@@ -1850,4 +1926,48 @@ load _helpers
       . | tee /dev/stderr |
       yq '.spec.template.spec.containers[0].command | any(contains("-federation"))' | tee /dev/stderr)
   [ "${actual}" = "true" ]
+}
+
+#--------------------------------------------------------------------
+# extraLabels
+
+@test "serverACLInit/Job: no extra labels defined by default" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml \
+      --set 'global.acls.manageSystemACLs=true' \
+      . | tee /dev/stderr |
+      yq -r '.spec.template.metadata.labels | del(."app") | del(."chart") | del(."release") | del(."component")' | tee /dev/stderr)
+  [ "${actual}" = "{}" ]
+}
+
+@test "serverACLInit/Job: extra global labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.extraLabels.foo=bar' \
+      . | tee /dev/stderr)
+  local actualBar=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualBar}" = "bar" ]
+  local actualTemplateBar=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  [ "${actualTemplateBar}" = "bar" ]
+}
+
+@test "serverACLInit/Job: multiple global extra labels can be set" {
+  cd `chart_dir`
+  local actual=$(helm template \
+      -s templates/server-acl-init-job.yaml \
+      --set 'global.acls.manageSystemACLs=true' \
+      --set 'global.extraLabels.foo=bar' \
+      --set 'global.extraLabels.baz=qux' \
+      . | tee /dev/stderr)
+  local actualFoo=$(echo "${actual}" | yq -r '.metadata.labels.foo' | tee /dev/stderr)
+  local actualBaz=$(echo "${actual}" | yq -r '.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualFoo}" = "bar" ]
+  [ "${actualBaz}" = "qux" ]
+  local actualTemplateFoo=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.foo' | tee /dev/stderr)
+  local actualTemplateBaz=$(echo "${actual}" | yq -r '.spec.template.metadata.labels.baz' | tee /dev/stderr)
+  [ "${actualTemplateFoo}" = "bar" ]
+  [ "${actualTemplateBaz}" = "qux" ]
 }
