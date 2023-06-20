@@ -128,6 +128,9 @@ const (
 	// passed via the -envoy-extra-args flag.
 	AnnotationEnvoyExtraArgs = "consul.hashicorp.com/envoy-extra-args"
 
+	// annotationSidecarProxyPreStopDelay to add a pre-stop delay to the sidecar proxy.
+	AnnotationSidecarProxyPreStopDelay = "consul.hashicorp.com/sidecar-proxy-prestop-delay"
+
 	// AnnotationConsulNamespace is the Consul namespace the service is registered into.
 	AnnotationConsulNamespace = "consul.hashicorp.com/consul-namespace"
 

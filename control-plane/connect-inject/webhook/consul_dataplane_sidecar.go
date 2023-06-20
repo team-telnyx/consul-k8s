@@ -110,6 +110,19 @@ func (w *MeshWebhook) consulDataplaneSidecar(namespace corev1.Namespace, pod cor
 		container.VolumeMounts = append(container.VolumeMounts, saTokenVolumeMount)
 	}
 
+	// Prestop hook
+	if _, ok := pod.Annotations[constants.AnnotationSidecarProxyPreStopDelay]; ok {
+		preStopHook := &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler {
+				Exec: &corev1.ExecAction {
+					Command: []string{
+								  "/bin/sh",
+								  "-c",
+							"sleep " + pod.Annotations[constants.AnnotationSidecarProxyPreStopDelay],
+			}}}}
+		container.Lifecycle = preStopHook
+	}
+
 	if useProxyHealthCheck(pod) {
 		// Configure the Readiness Address for the proxy's health check to be the Pod IP.
 		container.Env = append(container.Env, corev1.EnvVar{
