@@ -1078,6 +1078,9 @@ func (r *Controller) getGracefulShutdownAndUpdatePodCheck(ctx context.Context, a
 		serviceRegistration := &api.CatalogRegistration{
 			Node:    svc.Node,
 			Address: pod.Status.HostIP,
+			NodeMeta: map[string]string{
+				metaKeySyntheticNode: "true",
+			},
 			// Service is nil since we are patching the health status
 			Check: &api.AgentCheck{
 				CheckID:   consulHealthCheckID(pod.Namespace, svc.ServiceID),

@@ -7628,3 +7628,261 @@ func TestReconcile_CompleteNodeInfo(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcile_VirtualNodeMetadataLostDuringGracefulShutdown verifies that when
+// getGracefulShutdownAndUpdatePodCheck fires a Catalog().Register() to update a
+// health check to critical, the CatalogRegistration includes NodeMeta with
+// synthetic-node=true. Without the fix, NodeMeta is omitted — if the virtual node
+// was previously deleted and gets recreated by this Register() call, the node ends
+// up with Meta: nil, which breaks deregisterNode's filter that requires
+// NodeMeta["synthetic-node"] == "true".
+//
+// The race condition in production:
+//  1. Services are registered on a virtual node with NodeMeta{"synthetic-node":"true"}
+//  2. An endpoint reconcile finds the services (serviceInstances query caches results)
+//  3. Between the query and the health-check update, a concurrent reconcile deletes
+//     the virtual node (via deregisterNode after deregistering another service)
+//  4. getGracefulShutdownAndUpdatePodCheck calls Catalog().Register() which recreates
+//     the node — without the fix, NodeMeta is omitted so the node gets Meta: nil
+//
+// This test has two sub-tests:
+//   - "reconcile_graceful_shutdown_preserves_node_metadata": Runs the full reconcile
+//     path to verify getGracefulShutdownAndUpdatePodCheck triggers and services are
+//     marked critical (not deleted). Confirms the code path is exercised.
+//   - "register_without_nodemeta_loses_metadata_on_node_recreation": Demonstrates the
+//     actual bug — when a virtual node is deleted and Catalog().Register() recreates
+//     it WITHOUT NodeMeta, the node loses its metadata. This is what the fix prevents.
+func TestReconcile_VirtualNodeMetadataLostDuringGracefulShutdown(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reconcile_graceful_shutdown_preserves_node_metadata", func(t *testing.T) {
+		t.Parallel()
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
+
+		// Pod with graceful shutdown annotations.
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod1",
+				Namespace: "default",
+				UID:       "uid-1",
+				Annotations: map[string]string{
+					constants.AnnotationEnableSidecarProxyLifecycle:                     "true",
+					constants.AnnotationSidecarProxyLifecycleShutdownGracePeriodSeconds: "10",
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: nodeName,
+			},
+			Status: corev1.PodStatus{
+				PodIP:  "1.2.3.4",
+				HostIP: consulNodeAddress,
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionFalse,
+				}},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().WithRuntimeObjects(ns, node, pod).Build()
+
+		testClient := test.TestServerWithMockConnMgrWatcher(t, nil)
+		consulClient := testClient.APIClient
+		testClient.TestServer.WaitForActiveCARoot(t)
+
+		// Register services on virtual node with proper NodeMeta.
+		for _, svc := range []*api.AgentService{
+			{
+				ID:      "pod1-service-deleted",
+				Service: "service-deleted",
+				Port:    80,
+				Address: "1.2.3.4",
+				Meta: map[string]string{
+					metaKeyKubeServiceName:   "service-deleted",
+					constants.MetaKeyKubeNS:  "default",
+					metaKeyManagedBy:         constants.ManagedByValue,
+					metaKeySyntheticNode:     "true",
+					constants.MetaKeyPodName: "pod1",
+					constants.MetaKeyPodUID:  "uid-1",
+				},
+			},
+			{
+				Kind:    api.ServiceKindConnectProxy,
+				ID:      "pod1-service-deleted-sidecar-proxy",
+				Service: "service-deleted-sidecar-proxy",
+				Port:    20000,
+				Address: "1.2.3.4",
+				Proxy: &api.AgentServiceConnectProxyConfig{
+					DestinationServiceName: "service-deleted",
+					DestinationServiceID:   "pod1-service-deleted",
+				},
+				Meta: map[string]string{
+					metaKeyKubeServiceName:   "service-deleted",
+					constants.MetaKeyKubeNS:  "default",
+					metaKeyManagedBy:         constants.ManagedByValue,
+					metaKeySyntheticNode:     "true",
+					constants.MetaKeyPodName: "pod1",
+					constants.MetaKeyPodUID:  "uid-1",
+				},
+			},
+		} {
+			_, err := consulClient.Catalog().Register(&api.CatalogRegistration{
+				Node:    consulNodeName,
+				Address: consulNodeAddress,
+				NodeMeta: map[string]string{
+					metaKeySyntheticNode: "true",
+				},
+				Service: svc,
+			}, nil)
+			require.NoError(t, err)
+		}
+
+		// Reconcile (endpoint "service-deleted" doesn't exist in K8s → deregisterService path).
+		ep := &Controller{
+			Client:                fakeClient,
+			Log:                   logrtest.New(t),
+			ConsulClientConfig:    testClient.Cfg,
+			ConsulServerConnMgr:   testClient.Watcher,
+			AllowK8sNamespacesSet: mapset.NewSetWith("*"),
+			DenyK8sNamespacesSet:  mapset.NewSetWith(),
+			ReleaseName:           "consul",
+			ReleaseNamespace:      "default",
+		}
+		resp, err := ep.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Namespace: "default", Name: "service-deleted"},
+		})
+		require.NoError(t, err)
+		require.True(t, resp.RequeueAfter > 0, "should requeue for graceful shutdown")
+
+		// Verify virtual node still has correct metadata.
+		nodes, _, err := consulClient.Catalog().Nodes(nil)
+		require.NoError(t, err)
+		var virtualNode *api.Node
+		for _, n := range nodes {
+			if n.Node == consulNodeName {
+				virtualNode = n
+				break
+			}
+		}
+		require.NotNil(t, virtualNode)
+		require.Equal(t, "true", virtualNode.Meta[metaKeySyntheticNode],
+			"virtual node should have synthetic-node metadata after graceful shutdown reconcile")
+
+		// Verify health checks are critical.
+		checks, _, err := consulClient.Health().Checks("service-deleted", nil)
+		require.NoError(t, err)
+		require.Equal(t, api.HealthCritical, checks.AggregatedStatus(),
+			"service should be marked critical during graceful shutdown")
+	})
+
+	t.Run("register_without_nodemeta_loses_metadata_on_node_recreation", func(t *testing.T) {
+		t.Parallel()
+
+		// This sub-test demonstrates the actual bug: when a virtual node is deleted
+		// and Catalog().Register() recreates it without NodeMeta, the node loses
+		// its synthetic-node metadata.
+
+		testClient := test.TestServerWithMockConnMgrWatcher(t, nil)
+		consulClient := testClient.APIClient
+		testClient.TestServer.WaitForActiveCARoot(t)
+
+		// Step 1: Create virtual node with proper metadata via service registration.
+		_, err := consulClient.Catalog().Register(&api.CatalogRegistration{
+			Node:    consulNodeName,
+			Address: consulNodeAddress,
+			NodeMeta: map[string]string{
+				metaKeySyntheticNode: "true",
+			},
+			Service: &api.AgentService{
+				ID:      "test-svc",
+				Service: "test-svc",
+				Port:    80,
+			},
+		}, nil)
+		require.NoError(t, err)
+
+		// Verify node has metadata.
+		nodes, _, err := consulClient.Catalog().Nodes(nil)
+		require.NoError(t, err)
+		var vn *api.Node
+		for _, n := range nodes {
+			if n.Node == consulNodeName {
+				vn = n
+				break
+			}
+		}
+		require.NotNil(t, vn)
+		require.Equal(t, "true", vn.Meta[metaKeySyntheticNode])
+
+		// Step 2: Delete the virtual node (simulates deregisterNode in a concurrent reconcile).
+		_, err = consulClient.Catalog().Deregister(&api.CatalogDeregistration{Node: consulNodeName}, nil)
+		require.NoError(t, err)
+
+		// Step 3: Simulate the BUGGY Register() call — no NodeMeta.
+		// This is what getGracefulShutdownAndUpdatePodCheck did before the fix.
+		_, err = consulClient.Catalog().Register(&api.CatalogRegistration{
+			Node:    consulNodeName,
+			Address: consulNodeAddress,
+			// BUG: no NodeMeta!
+			Check: &api.AgentCheck{
+				CheckID: "test-check",
+				Name:    "test",
+				Status:  api.HealthCritical,
+			},
+			SkipNodeUpdate: true,
+		}, nil)
+		require.NoError(t, err)
+
+		// The node is recreated but WITHOUT synthetic-node metadata — this is the bug.
+		nodes, _, err = consulClient.Catalog().Nodes(nil)
+		require.NoError(t, err)
+		vn = nil
+		for _, n := range nodes {
+			if n.Node == consulNodeName {
+				vn = n
+				break
+			}
+		}
+		require.NotNil(t, vn, "node should be recreated by Register()")
+		require.Empty(t, vn.Meta[metaKeySyntheticNode],
+			"BUG DEMONSTRATION: without NodeMeta in CatalogRegistration, "+
+				"a recreated node loses its synthetic-node metadata")
+
+		// Step 4: Now simulate the FIXED Register() call — WITH NodeMeta.
+		// Delete the node again first.
+		_, err = consulClient.Catalog().Deregister(&api.CatalogDeregistration{Node: consulNodeName}, nil)
+		require.NoError(t, err)
+
+		// This is what getGracefulShutdownAndUpdatePodCheck does AFTER the fix.
+		_, err = consulClient.Catalog().Register(&api.CatalogRegistration{
+			Node:    consulNodeName,
+			Address: consulNodeAddress,
+			NodeMeta: map[string]string{
+				metaKeySyntheticNode: "true",
+			},
+			Check: &api.AgentCheck{
+				CheckID: "test-check",
+				Name:    "test",
+				Status:  api.HealthCritical,
+			},
+			SkipNodeUpdate: true,
+		}, nil)
+		require.NoError(t, err)
+
+		// The node is recreated WITH synthetic-node metadata — fix works.
+		nodes, _, err = consulClient.Catalog().Nodes(nil)
+		require.NoError(t, err)
+		vn = nil
+		for _, n := range nodes {
+			if n.Node == consulNodeName {
+				vn = n
+				break
+			}
+		}
+		require.NotNil(t, vn, "node should be recreated by Register()")
+		require.Equal(t, "true", vn.Meta[metaKeySyntheticNode],
+			"FIX VERIFICATION: with NodeMeta in CatalogRegistration, "+
+				"a recreated node preserves its synthetic-node metadata")
+	})
+}

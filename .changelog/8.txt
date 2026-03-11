@@ -1,0 +1,3 @@
+```release-note:bug
+connect-inject: Fix virtual node metadata loss during graceful shutdown when a concurrent reconcile deletes and recreates the node without `synthetic-node` metadata, causing orphaned nodes that can never be cleaned up.
+```
