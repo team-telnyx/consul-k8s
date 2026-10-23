@@ -41,6 +41,7 @@ const (
 	metaKeySyntheticNode       = "synthetic-node"
 	metaKeyConsulWANFederation = "consul-wan-federation"
 	tokenMetaPodNameKey        = "pod"
+	nodeLabelMetaValuePrefix   = "$NODE_LABEL:"
 
 	// Gateway types for registration.
 	meshGateway        = "mesh-gateway"
@@ -470,12 +471,23 @@ func (r *Controller) createServiceRegistrations(pod corev1.Pod, podIP string, se
 		metaKeySyntheticNode:     "true",
 	}
 	for k, v := range pod.Annotations {
-		if strings.HasPrefix(k, constants.AnnotationMeta) && strings.TrimPrefix(k, constants.AnnotationMeta) != "" {
-			if v == "$POD_NAME" {
-				meta[strings.TrimPrefix(k, constants.AnnotationMeta)] = pod.Name
-			} else {
-				meta[strings.TrimPrefix(k, constants.AnnotationMeta)] = v
+		if !strings.HasPrefix(k, constants.AnnotationMeta) {
+			continue
+		}
+		metaKey := strings.TrimPrefix(k, constants.AnnotationMeta)
+		if metaKey == "" {
+			continue
+		}
+		switch {
+		case v == "$POD_NAME":
+			meta[metaKey] = pod.Name
+		case strings.HasPrefix(v, nodeLabelMetaValuePrefix):
+			nodeLabel := strings.TrimSpace(strings.TrimPrefix(v, nodeLabelMetaValuePrefix))
+			if value, ok := node.Labels[nodeLabel]; nodeLabel != "" && ok {
+				meta[metaKey] = value
 			}
+		default:
+			meta[metaKey] = v
 		}
 	}
 	tags := consulTags(pod)

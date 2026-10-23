@@ -92,7 +92,8 @@ const (
 
 	// AnnotationMeta is a list of metadata key/value pairs to add to the service
 	// registration. This is specified in the format `<key>:<value>`
-	// e.g. consul.hashicorp.com/service-meta-foo:bar.
+	// e.g. consul.hashicorp.com/service-meta-foo:bar. Values may interpolate
+	// `$POD_NAME` or a scheduled node label with `$NODE_LABEL:<label>`.
 	AnnotationMeta = "consul.hashicorp.com/service-meta-"
 
 	// AnnotationUseProxyHealthCheck creates a readiness listener on the sidecar proxy and
